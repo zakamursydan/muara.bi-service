@@ -37,9 +37,9 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
 
 ## 3. Status Terkini (Current Snapshot)
 
-- **Fase Aktif:** Phase 2 (Distributed DuckDB Engine, Smart Caching, Connectors & Multi-Worker)
-- **Subtask Saat Ini:** Setup DuckDB CGO session factory, AST parser guardrails, dan Redis query caching.
-- **Subtask Berikutnya:** NoSQL MongoDB in-memory adapter, SSH bastion pool, dan Asynq worker queue.
+- **Fase Aktif:** Phase 3 (Dashboard Domain, RBAC/RLS, Sharing & Alerts Engine)
+- **Subtask Saat Ini:** Project & Dashboard CRUD, Widget CRUD (SYNCED vs CUSTOM_SQL), Dynamic RLS AST Injection.
+- **Subtask Berikutnya:** Public Sharing & Signed JWT Embed, Scheduled Digest & Threshold Alerts Dispatcher, AI Co-Pilot Service.
 
 ---
 
@@ -76,15 +76,15 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
 ---
 
 ### Phase 2: Distributed DuckDB Engine, Smart Caching, Connectors & Multi-Worker
-- [ ] Ephemeral in-memory DuckDB session factory (`internal/duckdb/session.go`).
-- [ ] AST SQL Parser guardrails (`internal/duckdb/guardrails.go`: Auto-LIMIT 10000, 30s timeout, anti-DDL/DML).
-- [ ] Smart Query Caching di Redis (`internal/cache/query_cache.go` dengan `X-Force-Refresh`).
-- [ ] Reusable Semantic Models / Virtual Views (`internal/duckdb/semantic_layer.go`).
-- [ ] NoSQL Streaming In-Memory Adapter untuk MongoDB (`internal/duckdb/nosql_adapter.go`).
-- [ ] Strict Parameterized Query Binding (`$1, $2`) untuk `{{param}}` & cross-filter.
-- [ ] Dynamic SSH Bastion Tunnel pool (`internal/ssh`).
-- [ ] Distributed Asynq Worker Pool (`cmd/worker/main.go`, `query_worker.go`, `export_worker.go`, `alert_worker.go`).
-- [ ] Connection, Schema, Query, dan Semantic Model CRUD Repositories & Services.
+- [x] Ephemeral in-memory DuckDB session factory (`internal/duckdb/session.go`, `session_cgo.go`, `session_fallback.go`).
+- [x] AST SQL Parser guardrails (`internal/duckdb/guardrails.go`: Auto-LIMIT 10000, 30s timeout, anti-DDL/DML).
+- [x] Smart Query Caching di Redis (`internal/cache/query_cache.go` dengan `X-Force-Refresh`).
+- [x] Reusable Semantic Models / Virtual Views (`internal/duckdb/semantic_layer.go`).
+- [x] NoSQL Streaming In-Memory Adapter untuk MongoDB (`internal/duckdb/nosql_adapter.go`).
+- [x] Strict Parameterized Query Binding (`$1, $2`) untuk `{{param}}` & cross-filter.
+- [x] Dynamic SSH Bastion Tunnel pool (`internal/ssh/bastion.go`).
+- [x] Distributed Asynq Worker Pool (`cmd/worker/main.go`, `query_worker.go`, `export_worker.go`, `alert_worker.go`).
+- [x] Connection, Schema, Query, dan Semantic Model CRUD Repositories & Services.
 
 ---
 

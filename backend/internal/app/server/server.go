@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"muara.bi/core/internal/config"
 	"muara.bi/core/internal/handler"
+	middlewarePkg "muara.bi/core/internal/middleware"
 	"muara.bi/core/pkg/logging"
 )
 
@@ -50,7 +51,7 @@ func (s *Server) BeforeStart(ctx context.Context) error {
 	}
 
 	repository := NewRepository(internalClient)
-	svc := NewService(repository, s.cfg, s.logger)
+	svc := NewService(repository, internalClient, s.cfg, s.logger)
 
 	// Health check endpoint
 	s.router.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -59,9 +60,21 @@ func (s *Server) BeforeStart(ctx context.Context) error {
 		_, _ = w.Write([]byte(`{"status":"ok","app":"muara.bi"}`))
 	})
 
-	// Handlers
+	// Public Handlers (Auth)
 	authHandler := handler.NewAuthHandler(svc.AuthService, s.cfg.AppSecretKey, s.logger)
 	authHandler.RegisterRoutes(s.router)
+
+	// Protected Routes (JWT Required)
+	connHandler := handler.NewConnectionHandler(svc.ConnectionService)
+	queryHandler := handler.NewQueryHandler(svc.QueryService)
+	semanticHandler := handler.NewSemanticHandler(svc.SemanticService)
+
+	s.router.Group(func(protected chi.Router) {
+		protected.Use(middlewarePkg.JWTMiddleware(s.cfg.AppSecretKey))
+		connHandler.RegisterRoutes(protected)
+		queryHandler.RegisterRoutes(protected)
+		semanticHandler.RegisterRoutes(protected)
+	})
 
 	s.InternalConnection = &internalClient
 	return nil
