@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  # Metadata Database for Muara.bi Platform
+  postgres:
+    image: postgres:16-alpine
+    container_name: muara_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-muara_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-muara_secret_pass}
+      POSTGRES_DB: ${DB_NAME:-muara_bi_db}
+    ports:
+      - "${DB_PORT:-5434}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-muara_user} -d ${DB_NAME:-muara_bi_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Redis for Asynq Distributed Worker Queue
+  redis:
+    image: redis:7-alpine
+    container_name: muara_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Target Sample Database 1: PostgreSQL (e.g. sample_ecommerce)
+  sample_postgres:
+    image: postgres:16-alpine
+    container_name: muara_sample_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sample_user
+      POSTGRES_PASSWORD: sample_password
+      POSTGRES_DB: sample_ecommerce
+    ports:
+      - "5435:5432"
+    volumes:
+      - sample_postgres_data:/var/lib/postgresql/data
+
+  # Target Sample Database 2: MongoDB (e.g. sample_events)
+  sample_mongo:
+    image: mongo:7.0
+    container_name: muara_sample_mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongo_user
+      MONGO_INITDB_ROOT_PASSWORD: mongo_password
+      MONGO_INITDB_DATABASE: sample_analytics
+    ports:
+      - "27017:27017"
+    volumes:
+      - sample_mongo_data:/data/db
+
+volumes:
+  postgres_data:
+  redis_data:
+  sample_postgres_data:
+  sample_mongo_data:

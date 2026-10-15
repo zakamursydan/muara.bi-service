@@ -1,0 +1,36 @@
+# Binaries and executables
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+build/
+backend/main
+backend/cmd/api/api.exe
+
+# Environment variables
+.env
+*.local
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+[Dd]esktop.ini
+.DS_Store
+
+# Go specific
+vendor/
+*.log
+
+# Node specific
+node_modules/
+.next/
+out/
+.turbo/
