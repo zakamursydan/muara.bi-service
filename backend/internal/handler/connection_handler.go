@@ -5,27 +5,30 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"muara.bi/core/internal/domain/entity"
 	"muara.bi/core/internal/dto/request"
+	"muara.bi/core/internal/middleware"
 	"muara.bi/core/internal/service"
 	"muara.bi/core/pkg/httputil"
 )
 
 type ConnectionHandler struct {
 	service service.ConnectionServiceProvider
+	guard   *middleware.Guard
 }
 
-func NewConnectionHandler(service service.ConnectionServiceProvider) *ConnectionHandler {
-	return &ConnectionHandler{service: service}
+func NewConnectionHandler(service service.ConnectionServiceProvider, guard *middleware.Guard) *ConnectionHandler {
+	return &ConnectionHandler{service: service, guard: guard}
 }
 
+// RegisterRoutes mounts connection routes relative to the
+// /api/v1/workspaces/{wsId} router.
 func (h *ConnectionHandler) RegisterRoutes(r chi.Router) {
-	r.Route("/api/v1/workspaces/{wsId}/connections", func(r chi.Router) {
-		r.Post("/", h.Create)
-		r.Get("/", h.List)
-		r.Post("/{connId}/environments", h.UpsertEnvironment)
-		r.Post("/{connId}/environments/{envTag}/test", h.Test)
-		r.Post("/{connId}/environments/{envTag}/sync-schema", h.SyncSchema)
-	})
+	r.With(h.guard.Require(entity.PermConnectionWrite)).Post("/connections", h.Create)
+	r.With(h.guard.Require(entity.PermConnectionRead)).Get("/connections", h.List)
+	r.With(h.guard.Require(entity.PermConnectionWrite)).Post("/connections/{connId}/environments", h.UpsertEnvironment)
+	r.With(h.guard.Require(entity.PermConnectionRead)).Post("/connections/{connId}/environments/{envTag}/test", h.Test)
+	r.With(h.guard.Require(entity.PermConnectionWrite)).Post("/connections/{connId}/environments/{envTag}/sync-schema", h.SyncSchema)
 }
 
 func (h *ConnectionHandler) Create(w http.ResponseWriter, r *http.Request) {

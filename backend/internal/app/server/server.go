@@ -20,6 +20,7 @@ type Server struct {
 	logger *logging.Logger
 
 	InternalConnection *InternalConnection
+	service            Service
 }
 
 func NewAppServer(cfg *config.Config, logger *logging.Logger) *Server {
@@ -52,6 +53,7 @@ func (s *Server) BeforeStart(ctx context.Context) error {
 
 	repository := NewRepository(internalClient)
 	svc := NewService(repository, internalClient, s.cfg, s.logger)
+	s.service = svc
 
 	// Health check endpoint
 	s.router.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -64,16 +66,26 @@ func (s *Server) BeforeStart(ctx context.Context) error {
 	authHandler := handler.NewAuthHandler(svc.AuthService, s.cfg.AppSecretKey, s.logger)
 	authHandler.RegisterRoutes(s.router)
 
-	// Protected Routes (JWT Required)
-	connHandler := handler.NewConnectionHandler(svc.ConnectionService)
-	queryHandler := handler.NewQueryHandler(svc.QueryService)
-	semanticHandler := handler.NewSemanticHandler(svc.SemanticService)
+	// Tenant-scoped routes (JWT required). A single subrouter owns the
+	// /api/v1/workspaces/{wsId} prefix so that handler routes registered by
+	// different domains can never collide on the same chi mount point.
+	guard := middlewarePkg.NewGuard(svc.AccessService)
+	s.router.Route("/api/v1/workspaces/{wsId}", func(ws chi.Router) {
+		ws.Use(middlewarePkg.JWTMiddleware(s.cfg.AppSecretKey))
 
-	s.router.Group(func(protected chi.Router) {
-		protected.Use(middlewarePkg.JWTMiddleware(s.cfg.AppSecretKey))
-		connHandler.RegisterRoutes(protected)
-		queryHandler.RegisterRoutes(protected)
-		semanticHandler.RegisterRoutes(protected)
+		handler.NewConnectionHandler(svc.ConnectionService, guard).RegisterRoutes(ws)
+		handler.NewQueryHandler(svc.QueryService, guard).RegisterRoutes(ws)
+		handler.NewSemanticHandler(svc.SemanticService, guard).RegisterRoutes(ws)
+		handler.NewProjectHandler(svc.ProjectService, guard).RegisterRoutes(ws)
+		handler.NewDashboardHandler(svc.DashboardService, guard).RegisterRoutes(ws)
+		handler.NewWidgetHandler(svc.WidgetService, guard).RegisterRoutes(ws)
+		handler.NewShareHandler(svc.ShareService, guard).RegisterRoutes(ws)
+	})
+
+	// Public share surface. No JWT: the share token (or a signed embed token) is
+	// the credential, and the routes accept no SQL, env tag or tenant identifier.
+	s.router.Route("/api/v1/public", func(pub chi.Router) {
+		handler.NewPublicHandler(svc.ShareService, s.cfg.AppPublicBaseURL).RegisterRoutes(pub)
 	})
 
 	s.InternalConnection = &internalClient
@@ -86,6 +98,10 @@ func (s *Server) AfterStart(ctx context.Context) error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	if err := s.service.Close(); err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to close analytical engine: %s", err.Error()))
+	}
+
 	if s.InternalConnection != nil {
 		if err := s.InternalConnection.Close(); err != nil {
 			s.logger.Error(fmt.Sprintf("Failed to close DB/Redis connection: %s", err.Error()))

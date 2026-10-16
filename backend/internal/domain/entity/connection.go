@@ -17,14 +17,14 @@ type DataConnection struct {
 
 // ConnectionConfig is the decrypted database credential payload
 type ConnectionConfig struct {
-	Host       string         `json:"host"`
-	Port       int            `json:"port"`
-	Database   string         `json:"database"`
-	User       string         `json:"user"`
-	Password   string         `json:"password"`
-	SSLMode    string         `json:"ssl_mode,omitempty"`
-	URI        string         `json:"uri,omitempty"` // For MongoDB / Cloud connections
-	SSHTunnel  *SSHConfigJSON `json:"ssh_tunnel,omitempty"`
+	Host      string         `json:"host"`
+	Port      int            `json:"port"`
+	Database  string         `json:"database"`
+	User      string         `json:"user"`
+	Password  string         `json:"password"`
+	SSLMode   string         `json:"ssl_mode,omitempty"`
+	URI       string         `json:"uri,omitempty"` // For MongoDB / Cloud connections
+	SSHTunnel *SSHConfigJSON `json:"ssh_tunnel,omitempty"`
 }
 
 type SSHConfigJSON struct {

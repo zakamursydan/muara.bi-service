@@ -17,6 +17,17 @@ type Service struct {
 	ConnectionService service.ConnectionServiceProvider
 	QueryService      service.QueryServiceProvider
 	SemanticService   service.SemanticServiceProvider
+	ProjectService    service.ProjectServiceProvider
+	DashboardService  service.DashboardServiceProvider
+	WidgetService     service.WidgetServiceProvider
+	ShareService      service.ShareServiceProvider
+	AccessService     service.AccessServiceProvider
+
+	// Preparer is reused by background workers so async jobs enforce the same
+	// attach, guardrail and RLS rules as the synchronous query API.
+	Preparer   *service.SessionPreparer
+	Engine     duckdb.Engine
+	QueryCache *cache.QueryCache
 }
 
 func NewService(
@@ -25,34 +36,56 @@ func NewService(
 	cfg *config.Config,
 	logger *logging.Logger,
 ) Service {
-	// Crypto helper for master key encryption
 	cryptoHelper, err := cryptohelper.NewCryptoHelper(cfg.AppEncryptionMasterKey)
 	if err != nil {
 		logger.Fatal("failed to initialize crypto helper: " + err.Error())
 	}
 
-	// SSH tunnel pool
 	sshPool := ssh.NewTunnelPool()
 
-	// DuckDB Analytical Engine
 	duckdbEngine, err := duckdb.NewEngine(duckdb.DefaultGuardrailConfig())
 	if err != nil {
 		logger.Fatal("failed to initialize duckdb engine: " + err.Error())
 	}
 
-	// Smart query cache
 	queryCache := cache.NewQueryCache(internalConnection.Redis, 300*time.Second)
 
-	// Services
-	authSvc := service.NewAuthService(repository.UserRepo, cfg, logger)
 	connSvc := service.NewConnectionService(repository.ConnectionRepo, cryptoHelper, sshPool, logger)
-	semanticSvc := service.NewSemanticService(repository.SemanticRepo)
-	querySvc := service.NewQueryService(duckdbEngine, repository.ConnectionRepo, repository.SemanticRepo, connSvc, queryCache, logger)
+	preparer := service.NewSessionPreparer(duckdbEngine, repository.ConnectionRepo, repository.SemanticRepo, connSvc, logger)
+	accessSvc := service.NewAccessService(
+		repository.UserRepo,
+		repository.ProjectRepo,
+		repository.DashboardRepo,
+		repository.WidgetRepo,
+	)
 
 	return Service{
-		AuthService:       authSvc,
+		AuthService:       service.NewAuthService(repository.UserRepo, cfg, logger),
 		ConnectionService: connSvc,
-		QueryService:      querySvc,
-		SemanticService:   semanticSvc,
+		QueryService:      service.NewQueryService(preparer, accessSvc, queryCache, logger),
+		SemanticService:   service.NewSemanticService(repository.SemanticRepo),
+		ProjectService:    service.NewProjectService(repository.ProjectRepo),
+		DashboardService:  service.NewDashboardService(repository.DashboardRepo, repository.WidgetRepo, repository.ProjectRepo),
+		WidgetService:     service.NewWidgetService(repository.WidgetRepo, repository.DashboardRepo),
+		ShareService: service.NewShareService(
+			repository.ShareRepo,
+			repository.DashboardRepo,
+			repository.WidgetRepo,
+			preparer,
+			cfg,
+			logger,
+		),
+		AccessService: accessSvc,
+		Preparer:      preparer,
+		Engine:        duckdbEngine,
+		QueryCache:    queryCache,
 	}
+}
+
+// Close releases the in-process analytical engine.
+func (s Service) Close() error {
+	if s.Engine == nil {
+		return nil
+	}
+	return s.Engine.Close()
 }

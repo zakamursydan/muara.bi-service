@@ -11,22 +11,22 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
-	"muara.bi/core/internal/duckdb"
+	"muara.bi/core/internal/service"
 	"muara.bi/core/pkg/logging"
 )
 
 // AlertWorker evaluates threshold queries and dispatches notifications
 type AlertWorker struct {
 	db         *sql.DB
-	engine     duckdb.Engine
+	preparer   *service.SessionPreparer
 	httpClient *http.Client
 	logger     *logging.Logger
 }
 
-func NewAlertWorker(db *sql.DB, engine duckdb.Engine, logger *logging.Logger) *AlertWorker {
+func NewAlertWorker(db *sql.DB, preparer *service.SessionPreparer, logger *logging.Logger) *AlertWorker {
 	return &AlertWorker{
 		db:         db,
-		engine:     engine,
+		preparer:   preparer,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 		logger:     logger,
 	}
@@ -40,19 +40,14 @@ func (w *AlertWorker) ProcessTask(ctx context.Context, t *asynq.Task) error {
 
 	w.logger.Info(fmt.Sprintf("evaluating alert: id=%s title=%q", payload.AlertID, payload.Title))
 
-	// 1. Guardrail validation
-	if err := duckdb.ValidateQuery(payload.RawSQL); err != nil {
-		return fmt.Errorf("alert query rejected by guardrail: %w", err)
-	}
-
-	// 2. Execute query
-	session, err := w.engine.NewSession(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to create duckdb session: %w", err)
-	}
-	defer session.Close()
-
-	result, err := session.Query(ctx, payload.RawSQL)
+	// 1. Execute the guardrailed aggregate query against the tenant session
+	result, err := w.preparer.Execute(ctx, service.PreparedQuery{
+		WorkspaceID: payload.WorkspaceID,
+		ProjectID:   payload.ProjectID,
+		EnvTag:      payload.EnvTag,
+		RawSQL:      payload.RawSQL,
+		MaxRows:     1,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to execute alert query: %w", err)
 	}

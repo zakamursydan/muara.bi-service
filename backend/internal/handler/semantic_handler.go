@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"muara.bi/core/internal/domain/entity"
 	"muara.bi/core/internal/dto/request"
 	"muara.bi/core/internal/middleware"
 	"muara.bi/core/internal/service"
@@ -13,20 +14,21 @@ import (
 
 type SemanticHandler struct {
 	service service.SemanticServiceProvider
+	guard   *middleware.Guard
 }
 
-func NewSemanticHandler(service service.SemanticServiceProvider) *SemanticHandler {
-	return &SemanticHandler{service: service}
+func NewSemanticHandler(service service.SemanticServiceProvider, guard *middleware.Guard) *SemanticHandler {
+	return &SemanticHandler{service: service, guard: guard}
 }
 
+// RegisterRoutes mounts semantic model routes relative to the
+// /api/v1/workspaces/{wsId} router.
 func (h *SemanticHandler) RegisterRoutes(r chi.Router) {
-	r.Route("/api/v1/workspaces/{wsId}", func(r chi.Router) {
-		r.Post("/projects/{projId}/semantic-models", h.Create)
-		r.Get("/projects/{projId}/semantic-models", h.List)
-		r.Get("/semantic-models/{id}", h.Get)
-		r.Put("/semantic-models/{id}", h.Update)
-		r.Delete("/semantic-models/{id}", h.Delete)
-	})
+	r.With(h.guard.Require(entity.PermSemanticWrite)).Post("/projects/{projId}/semantic-models", h.Create)
+	r.With(h.guard.Require(entity.PermSemanticRead)).Get("/projects/{projId}/semantic-models", h.List)
+	r.With(h.guard.Require(entity.PermSemanticRead)).Get("/semantic-models/{id}", h.Get)
+	r.With(h.guard.Require(entity.PermSemanticWrite)).Put("/semantic-models/{id}", h.Update)
+	r.With(h.guard.Require(entity.PermSemanticWrite)).Delete("/semantic-models/{id}", h.Delete)
 }
 
 func (h *SemanticHandler) Create(w http.ResponseWriter, r *http.Request) {

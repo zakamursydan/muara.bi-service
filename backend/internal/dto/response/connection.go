@@ -31,7 +31,7 @@ type EnvironmentInfoResponse struct {
 }
 
 type TestConnectionResponse struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
-	LatencyMs int64 `json:"latency_ms"`
+	Success   bool   `json:"success"`
+	Message   string `json:"message"`
+	LatencyMs int64  `json:"latency_ms"`
 }

@@ -7,12 +7,21 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"muara.bi/core/internal/helper/sqlident"
 )
 
 var (
 	ErrForbiddenStatement = errors.New("forbidden statement: only SELECT queries are permitted")
 	ErrEmptyQuery         = errors.New("query cannot be empty")
+	ErrInvalidRLSRule     = errors.New("invalid row-level security rule")
 )
+
+// rlsOperators is the closed set of comparisons an RLS rule may use. Values are
+// always bound as parameters, so only the operator and column reach SQL text.
+var rlsOperators = map[string]struct{}{
+	"=": {}, "!=": {}, ">": {}, "<": {}, ">=": {}, "<=": {},
+}
 
 // Regex patterns to detect forbidden DDL/DML keywords
 var forbiddenPatterns = []*regexp.Regexp{
@@ -31,7 +40,7 @@ var templateParamPattern = regexp.MustCompile(`\{\{\s*([a-zA-Z0-9_]+)\s*\}\}`)
 
 // GuardrailConfig holds execution limits
 type GuardrailConfig struct {
-	MaxRows         int           `json:"max_rows"`
+	MaxRows          int           `json:"max_rows"`
 	StatementTimeout time.Duration `json:"statement_timeout"`
 }
 
@@ -132,50 +141,62 @@ func TransformParameters(rawSQL string, paramValues map[string]any) (*ParameterB
 	}, nil
 }
 
-// InjectRLS injects Row-Level Security conditions into the SQL query
-// e.g. column: "branch_id", operator: "=", value: "JKT-01"
+// RLSRule is one resolved row-level filter, e.g. column "branch_id", operator
+// "=", value "JKT-01". Operator must be one of rlsOperators.
 type RLSRule struct {
 	Column   string `json:"column"`
-	Operator string `json:"operator"` // "=", "IN", "!=", etc.
+	Operator string `json:"operator"`
 	Value    any    `json:"value"`
 }
 
-// ApplyRLS wraps or appends RLS filter condition cleanly
-func ApplyRLS(sql string, rules []RLSRule, startParamIndex int) (string, []any) {
+// ApplyRLS wraps the query so the tenant's row filters cannot be bypassed by
+// anything the caller wrote:
+//
+//	SELECT * FROM ( <sql> ) AS __rls_subquery WHERE <rule> AND <rule>
+//
+// Column names are validated against a strict identifier whitelist and values
+// are always bound as positional parameters starting at startParamIndex. An
+// invalid rule fails closed with ErrInvalidRLSRule instead of being skipped,
+// because silently dropping a filter would widen the result set.
+func ApplyRLS(sql string, rules []RLSRule, startParamIndex int) (string, []any, error) {
 	if len(rules) == 0 {
-		return sql, nil
+		return sql, nil, nil
+	}
+	if startParamIndex < 1 {
+		startParamIndex = 1
 	}
 
-	var rlsConditions []string
-	var rlsArgs []any
+	conditions := make([]string, 0, len(rules))
+	rlsArgs := make([]any, 0, len(rules))
 	paramIdx := startParamIndex
 
 	for _, rule := range rules {
-		if rule.Column == "" {
-			continue
+		column := strings.TrimSpace(rule.Column)
+		if !sqlident.IsQualified(column) {
+			return "", nil, fmt.Errorf("%w: column %q is not a valid identifier", ErrInvalidRLSRule, rule.Column)
 		}
+
 		op := strings.ToUpper(strings.TrimSpace(rule.Operator))
 		if op == "" {
 			op = "="
 		}
+		if _, ok := rlsOperators[op]; !ok {
+			return "", nil, fmt.Errorf("%w: operator %q is not supported", ErrInvalidRLSRule, rule.Operator)
+		}
 
-		condition := fmt.Sprintf("%s %s $%d", rule.Column, op, paramIdx)
-		rlsConditions = append(rlsConditions, condition)
+		conditions = append(conditions, fmt.Sprintf("%s %s $%d", column, op, paramIdx))
 		rlsArgs = append(rlsArgs, rule.Value)
 		paramIdx++
 	}
 
-	if len(rlsConditions) == 0 {
-		return sql, nil
-	}
+	combinedRLS := strings.Join(conditions, " AND ")
+	wrappedSQL := fmt.Sprintf(
+		"SELECT * FROM (\n%s\n) AS __rls_subquery WHERE %s",
+		strings.TrimSuffix(strings.TrimSpace(sql), ";"),
+		combinedRLS,
+	)
 
-	combinedRLS := strings.Join(rlsConditions, " AND ")
-
-	// Wrap original query in a CTE or subquery to guarantee RLS scoping
-	// SELECT * FROM ( <original_sql> ) AS __rls_scoped_view WHERE <rls_conditions>
-	wrappedSQL := fmt.Sprintf("SELECT * FROM (\n%s\n) AS __rls_subquery WHERE %s", strings.TrimSuffix(strings.TrimSpace(sql), ";"), combinedRLS)
-
-	return wrappedSQL, rlsArgs
+	return wrappedSQL, rlsArgs, nil
 }
 
 // WithGuardrailTimeout creates a context bounded by guardrail timeout

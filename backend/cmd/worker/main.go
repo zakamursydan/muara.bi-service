@@ -5,12 +5,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"muara.bi/core/internal/app/server"
-	"muara.bi/core/internal/cache"
 	"muara.bi/core/internal/config"
-	"muara.bi/core/internal/duckdb"
 	"muara.bi/core/internal/worker"
 	"muara.bi/core/pkg/logging"
 )
@@ -27,34 +24,22 @@ func main() {
 
 	logger.Info("initializing muara.bi background worker pool...")
 
-	// Connect to PostgreSQL and Redis
 	conn, err := server.NewInternalConnection(ctx, logger, cfg)
 	if err != nil {
 		logger.Fatal("failed to connect to internal databases: " + err.Error())
 	}
+	defer conn.Close()
+
+	// Reuse the API wiring so background jobs share identical repositories,
+	// crypto, SSH pool and analytical engine configuration.
+	svc := server.NewService(server.NewRepository(conn), conn, cfg, logger)
 	defer func() {
-		if conn.DB != nil {
-			_ = conn.DB.Close()
-		}
-		if conn.Redis != nil {
-			_ = conn.Redis.Close()
+		if err := svc.Close(); err != nil {
+			logger.Error("failed to close analytical engine: " + err.Error())
 		}
 	}()
 
-	// Analytical engine
-	engine, err := duckdb.NewEngine(duckdb.DefaultGuardrailConfig())
-	if err != nil {
-		logger.Fatal("failed to initialize duckdb engine: " + err.Error())
-	}
-	defer engine.Close()
-
-	// Query cache
-	queryCache := cache.NewQueryCache(conn.Redis, 300*time.Second)
-
-	// Create worker server
-	workerServer := worker.NewWorkerServer(cfg, conn.DB, engine, queryCache, logger)
-
-	// Signal handling for graceful shutdown
+	workerServer := worker.NewWorkerServer(cfg, conn.DB, svc.Preparer, svc.AccessService, svc.QueryCache, logger)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)

@@ -80,6 +80,15 @@ func WriteNotFoundResponse(w http.ResponseWriter, r *http.Request, message strin
 	})
 }
 
+func WriteConflictResponse(w http.ResponseWriter, r *http.Request, message string, err any) {
+	writeJSON(w, http.StatusConflict, BaseResponse{
+		ReqID:   getReqID(r),
+		Status:  "conflict",
+		Message: message,
+		Error:   err,
+	})
+}
+
 func WriteInternalServerErrorResponse(w http.ResponseWriter, r *http.Request, message string, err any) {
 	writeJSON(w, http.StatusInternalServerError, BaseResponse{
 		ReqID:   getReqID(r),

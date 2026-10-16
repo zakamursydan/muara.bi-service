@@ -13,6 +13,7 @@ type Config struct {
 	AppHTTPPort            string `env:"APP_HTTP_PORT" default:"8080"`
 	AppSecretKey           string `env:"APP_SECRET_KEY" default:"muara-bi-super-secure-jwt-signing-secret-key-32b"`
 	AppEncryptionMasterKey string `env:"APP_ENCRYPTION_MASTER_KEY" default:"0123456789abcdef0123456789abcdef"` // 32 bytes for AES-256-GCM
+	AppPublicBaseURL       string `env:"APP_PUBLIC_BASE_URL" default:"http://localhost:3000"`                  // web origin used to build share links
 	Database               DatabaseConfig
 	Redis                  RedisConfig
 	Otel                   telemetry.OtelConfig

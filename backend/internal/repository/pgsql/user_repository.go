@@ -16,6 +16,7 @@ type UserRepositoryProvider interface {
 	CreateWorkspace(ctx context.Context, ws *entity.Workspace) error
 	AddWorkspaceMember(ctx context.Context, m *entity.WorkspaceMember) error
 	GetUserWorkspaces(ctx context.Context, userID string) ([]entity.Workspace, error)
+	GetWorkspaceRole(ctx context.Context, workspaceID, userID string) (string, error)
 }
 
 type UserRepository struct {
@@ -127,6 +128,25 @@ func (r *UserRepository) AddWorkspaceMember(ctx context.Context, m *entity.Works
 		RETURNING created_at
 	`
 	return r.db.QueryRowContext(ctx, query, m.WorkspaceID, m.UserID, m.Role).Scan(&m.CreatedAt)
+}
+
+// GetWorkspaceRole returns the caller's workspace_members.role, or "" when they
+// are not a member. Callers must treat "" as "no permissions".
+func (r *UserRepository) GetWorkspaceRole(ctx context.Context, workspaceID, userID string) (string, error) {
+	query := `
+		SELECT role FROM workspace_members
+		WHERE workspace_id = $1 AND user_id = $2
+	`
+
+	var role string
+	err := r.db.QueryRowContext(ctx, query, workspaceID, userID).Scan(&role)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to resolve workspace role: %w", err)
+	}
+	return role, nil
 }
 
 func (r *UserRepository) GetUserWorkspaces(ctx context.Context, userID string) ([]entity.Workspace, error) {

@@ -24,10 +24,10 @@ type UpsertEnvironmentRequest struct {
 	URI      string `json:"uri"`
 
 	// Collapsible Optional SSH Bastion Jump Host
-	SSHTunnelEnabled    bool   `json:"ssh_tunnel_enabled"`
-	SSHHost             string `json:"ssh_host"`
-	SSHPort             int    `json:"ssh_port"`
-	SSHUser             string `json:"ssh_user"`
-	SSHPassword         string `json:"ssh_password"`
-	SSHPrivateKey       string `json:"ssh_private_key"`
+	SSHTunnelEnabled bool   `json:"ssh_tunnel_enabled"`
+	SSHHost          string `json:"ssh_host"`
+	SSHPort          int    `json:"ssh_port"`
+	SSHUser          string `json:"ssh_user"`
+	SSHPassword      string `json:"ssh_password"`
+	SSHPrivateKey    string `json:"ssh_private_key"`
 }

@@ -27,10 +27,10 @@ type ConnectionServiceProvider interface {
 }
 
 type ConnectionService struct {
-	connRepo   pgsql.ConnectionRepositoryProvider
-	crypto     *cryptohelper.CryptoHelper
-	sshPool    *ssh.TunnelPool
-	logger     *logging.Logger
+	connRepo pgsql.ConnectionRepositoryProvider
+	crypto   *cryptohelper.CryptoHelper
+	sshPool  *ssh.TunnelPool
+	logger   *logging.Logger
 }
 
 func NewConnectionService(

@@ -7,23 +7,26 @@ import (
 
 	"github.com/hibiken/asynq"
 	"muara.bi/core/internal/cache"
-	"muara.bi/core/internal/duckdb"
+	"muara.bi/core/internal/domain/entity"
+	"muara.bi/core/internal/service"
 	"muara.bi/core/pkg/logging"
 )
 
-// QueryWorker handles asynchronous query executions
+// QueryWorker handles asynchronous heavy query executions.
 type QueryWorker struct {
-	engine duckdb.Engine
-	cache  *cache.QueryCache
-	logger *logging.Logger
+	preparer *service.SessionPreparer
+	access   service.AccessServiceProvider
+	cache    *cache.QueryCache
+	logger   *logging.Logger
 }
 
-func NewQueryWorker(engine duckdb.Engine, cache *cache.QueryCache, logger *logging.Logger) *QueryWorker {
-	return &QueryWorker{
-		engine: engine,
-		cache:  cache,
-		logger: logger,
-	}
+func NewQueryWorker(
+	preparer *service.SessionPreparer,
+	access service.AccessServiceProvider,
+	cache *cache.QueryCache,
+	logger *logging.Logger,
+) *QueryWorker {
+	return &QueryWorker{preparer: preparer, access: access, cache: cache, logger: logger}
 }
 
 func (w *QueryWorker) ProcessTask(ctx context.Context, t *asynq.Task) error {
@@ -32,39 +35,44 @@ func (w *QueryWorker) ProcessTask(ctx context.Context, t *asynq.Task) error {
 		return fmt.Errorf("failed to unmarshal query payload: %w", err)
 	}
 
-	w.logger.Info(fmt.Sprintf("processing async query for workspace=%s env=%s", payload.WorkspaceID, payload.EnvTag))
+	access, err := w.access.Resolve(ctx, service.Scope{
+		WorkspaceID: payload.WorkspaceID,
+		ProjectID:   payload.ProjectID,
+		UserID:      payload.UserID,
+		Attributes:  payload.UserAttributes,
+	})
+	if err != nil {
+		return err
+	}
+	if !access.Can(entity.PermQueryExecute) {
+		return fmt.Errorf("user %s may not run queries in project %s", payload.UserID, payload.ProjectID)
+	}
 
-	// 1. Guardrail validation
-	if err := duckdb.ValidateQuery(payload.RawSQL); err != nil {
-		w.logger.Error(fmt.Sprintf("query rejected by guardrail: %v", err))
+	envTag := service.NormalizeEnvTag(payload.EnvTag)
+	w.logger.Info(fmt.Sprintf("processing async query for workspace=%s env=%s rls_rules=%d",
+		payload.WorkspaceID, envTag, len(access.RLSRules)))
+
+	result, err := w.preparer.Execute(ctx, service.PreparedQuery{
+		WorkspaceID: payload.WorkspaceID,
+		ProjectID:   payload.ProjectID,
+		EnvTag:      envTag,
+		RawSQL:      payload.RawSQL,
+		Parameters:  payload.Parameters,
+		MaxRows:     payload.MaxRows,
+		RLSRules:    access.RLSRules,
+	})
+	if err != nil {
 		return err
 	}
 
-	// 2. Mustache parameter transformation
-	paramResult, err := duckdb.TransformParameters(payload.RawSQL, payload.Parameters)
-	if err != nil {
-		return fmt.Errorf("parameter transformation failed: %w", err)
-	}
-
-	// 3. Auto LIMIT
-	guardedSQL := duckdb.ApplyLimit(paramResult.ParameterizedSQL, 10000)
-
-	// 4. Session allocation & execution
-	session, err := w.engine.NewSession(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to create duckdb session: %w", err)
-	}
-	defer session.Close()
-
-	result, err := session.Query(ctx, guardedSQL, paramResult.OrderedArgs...)
-	if err != nil {
-		return fmt.Errorf("execution error: %w", err)
-	}
-
-	// 5. Cache result if requested
 	if payload.CacheTTL > 0 && w.cache != nil {
-		cacheKey := w.cache.GenerateKey(payload.WorkspaceID, payload.EnvTag, payload.RawSQL, payload.Parameters)
-		_ = w.cache.Set(ctx, cacheKey, result, payload.CacheTTL)
+		cacheKey := w.cache.GenerateKey(payload.WorkspaceID, envTag, payload.RawSQL, service.QueryCacheScope{
+			Parameters: payload.Parameters,
+			RLS:        access.RLSRules,
+		})
+		if err := w.cache.Set(ctx, cacheKey, result, payload.CacheTTL); err != nil {
+			w.logger.Warn(fmt.Sprintf("failed to persist async query cache: %v", err))
+		}
 	}
 
 	w.logger.Info(fmt.Sprintf("async query finished: row_count=%d duration_ms=%d", result.RowCount, result.DurationMs))
