@@ -80,6 +80,8 @@ func (s *Server) BeforeStart(ctx context.Context) error {
 		handler.NewDashboardHandler(svc.DashboardService, guard).RegisterRoutes(ws)
 		handler.NewWidgetHandler(svc.WidgetService, guard).RegisterRoutes(ws)
 		handler.NewShareHandler(svc.ShareService, guard).RegisterRoutes(ws)
+		handler.NewAlertHandler(svc.AlertService, guard).RegisterRoutes(ws)
+		handler.NewAIHandler(svc.AIService, guard).RegisterRoutes(ws)
 	})
 
 	// Public share surface. No JWT: the share token (or a signed embed token) is

@@ -32,14 +32,28 @@ func main() {
 
 	// Reuse the API wiring so background jobs share identical repositories,
 	// crypto, SSH pool and analytical engine configuration.
-	svc := server.NewService(server.NewRepository(conn), conn, cfg, logger)
+	repo := server.NewRepository(conn)
+	svc := server.NewService(repo, conn, cfg, logger)
 	defer func() {
 		if err := svc.Close(); err != nil {
 			logger.Error("failed to close analytical engine: " + err.Error())
 		}
 	}()
 
-	workerServer := worker.NewWorkerServer(cfg, conn.DB, svc.Preparer, svc.AccessService, svc.QueryCache, logger)
+	workerServer := worker.NewWorkerServer(
+		cfg,
+		conn.DB,
+		repo.DashboardRepo,
+		repo.WidgetRepo,
+		svc.Preparer,
+		svc.AccessService,
+		svc.QueryCache,
+		logger,
+	)
+
+	// Start active alert & digest cron scheduler
+	scheduler := worker.NewScheduler(repo.AlertRepo, repo.DashboardRepo, repo.WidgetRepo, svc.AsynqClient, logger)
+	scheduler.Start(ctx)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)

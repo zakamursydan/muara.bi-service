@@ -1,8 +1,10 @@
 package server
 
 import (
+	"fmt"
 	"time"
 
+	"github.com/hibiken/asynq"
 	"muara.bi/core/internal/cache"
 	"muara.bi/core/internal/config"
 	"muara.bi/core/internal/duckdb"
@@ -22,12 +24,15 @@ type Service struct {
 	WidgetService     service.WidgetServiceProvider
 	ShareService      service.ShareServiceProvider
 	AccessService     service.AccessServiceProvider
+	AlertService      service.AlertServiceProvider
+	AIService         service.AIServiceProvider
 
 	// Preparer is reused by background workers so async jobs enforce the same
 	// attach, guardrail and RLS rules as the synchronous query API.
-	Preparer   *service.SessionPreparer
-	Engine     duckdb.Engine
-	QueryCache *cache.QueryCache
+	Preparer    *service.SessionPreparer
+	Engine      duckdb.Engine
+	QueryCache  *cache.QueryCache
+	AsynqClient *asynq.Client
 }
 
 func NewService(
@@ -50,6 +55,12 @@ func NewService(
 
 	queryCache := cache.NewQueryCache(internalConnection.Redis, 300*time.Second)
 
+	asynqClient := asynq.NewClient(asynq.RedisClientOpt{
+		Addr:     fmt.Sprintf("%s:%s", cfg.Redis.Host, cfg.Redis.Port),
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.DB,
+	})
+
 	connSvc := service.NewConnectionService(repository.ConnectionRepo, cryptoHelper, sshPool, logger)
 	preparer := service.NewSessionPreparer(duckdbEngine, repository.ConnectionRepo, repository.SemanticRepo, connSvc, logger)
 	accessSvc := service.NewAccessService(
@@ -57,6 +68,21 @@ func NewService(
 		repository.ProjectRepo,
 		repository.DashboardRepo,
 		repository.WidgetRepo,
+	)
+	alertSvc := service.NewAlertService(
+		repository.AlertRepo,
+		repository.DashboardRepo,
+		repository.WidgetRepo,
+		asynqClient,
+		logger,
+	)
+	aiSvc := service.NewAIService(
+		repository.AIRepo,
+		repository.ConnectionRepo,
+		repository.SemanticRepo,
+		cryptoHelper,
+		cfg,
+		logger,
 	)
 
 	return Service{
@@ -76,14 +102,20 @@ func NewService(
 			logger,
 		),
 		AccessService: accessSvc,
+		AlertService:  alertSvc,
+		AIService:     aiSvc,
 		Preparer:      preparer,
 		Engine:        duckdbEngine,
 		QueryCache:    queryCache,
+		AsynqClient:   asynqClient,
 	}
 }
 
-// Close releases the in-process analytical engine.
+// Close releases the in-process analytical engine and asynq client.
 func (s Service) Close() error {
+	if s.AsynqClient != nil {
+		_ = s.AsynqClient.Close()
+	}
 	if s.Engine == nil {
 		return nil
 	}

@@ -10,6 +10,8 @@ type Repository struct {
 	DashboardRepo  pgsql.DashboardRepositoryProvider
 	WidgetRepo     pgsql.WidgetRepositoryProvider
 	ShareRepo      pgsql.ShareRepositoryProvider
+	AlertRepo      pgsql.AlertRepositoryProvider
+	AIRepo         pgsql.AIRepositoryProvider
 }
 
 func NewRepository(internalConnection InternalConnection) Repository {
@@ -21,5 +23,7 @@ func NewRepository(internalConnection InternalConnection) Repository {
 		DashboardRepo:  pgsql.NewDashboardRepository(internalConnection.DB),
 		WidgetRepo:     pgsql.NewWidgetRepository(internalConnection.DB),
 		ShareRepo:      pgsql.NewShareRepository(internalConnection.DB),
+		AlertRepo:      pgsql.NewAlertRepository(internalConnection.DB),
+		AIRepo:         pgsql.NewAIRepository(internalConnection.DB),
 	}
 }

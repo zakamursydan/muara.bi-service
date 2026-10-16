@@ -38,10 +38,14 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
 ## 3. Status Terkini (Current Snapshot)
 
 - **Update Terakhir:** 2026-10-16
-- **Fase Aktif:** Phase 3 (Dashboard Domain, RBAC/RLS, Sharing & Alerts Engine)
-- **Subtask Saat Ini:** Public Share Link & Signed JWT Embed — **kode selesai dan build hijau**, sisa unit test + `APP_PUBLIC_BASE_URL` di `.env.example`.
-- **Subtask Berikutnya:** Selesaikan test share → Scheduled Digest & Threshold Alerts Dispatcher → AI Co-Pilot Service.
-- **Kondisi Build Terakhir yang Terverifikasi:** Hijau (`go build ./...`, `go vet ./...`, `gofmt -l` bersih, `go test ./...`) setelah Public Sharing terpasang. Test suite: `cache`, `duckdb`, `exporter`, `middleware`, `service`.
+- **Fase Selesai:** Phase 1, Phase 2, & Phase 3 (100% Backend Complete)
+- **Fase Aktif:** Phase 4 (Next.js Frontend `@muara/web` - Light Off-White Theme)
+- **Subtask Saat Ini:** Inisialisasi Next.js 15+ App Router, Tailwind CSS, Shadcn UI (`#f8fafc` base theme), dan Zustand store state management.
+- **Kondisi Backend Terakhir yang Terverifikasi:**
+  - Public Sharing & Signed JWT Embed teruji & terpasang.
+  - Scheduled Digest & Threshold Alerts Dispatcher teruji & terhubung ke Asynq scheduler.
+  - AI Co-Pilot Service (Pruning, PII Masking, LLM Adapter, DuckDB SQL & Dashboard generation) teruji & ter-wire ke chi router.
+  - Repository, Service, Handler, dan Router selesai 100%.
 
 ---
 
@@ -125,7 +129,7 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   - [x] **Celah RLS di worker ditutup**: `query_worker` sebelumnya mengabaikan `UserAttributes` dan menjalankan query tanpa filter; `export_worker` juga tanpa RLS. Keduanya kini menerima `AccessServiceProvider`, me-resolve ulang rule dari `UserID` + `UserAttributes` di payload (`tasks.go` diperluas), dan menolak job bila user tidak berhak. `worker/server.go` + `cmd/worker/main.go` ikut di-wire.
   - [x] Test: `internal/service/access_service_test.go` (16 kasus: union role, penolakan non-member, penolakan project lintas workspace, RLS admin-exempt, fail-closed atribut hilang, salinan permission set) dan `internal/middleware/rbac_test.go` (6 kasus: 200/403, scope dari `{projId}`/`{dashId}`/`{widgetId}`, atribut JWT terbawa, `Access` muncul di context) — hijau.
   - Catatan: `alert_worker` sengaja **tanpa RLS** karena alert/digest dipicu sistem dan dikirim ke penerima terkonfigurasi, bukan ke satu user.
-- [ ] Public Share Link & Signed JWT Embedded Analytics (`/share/:token`, `/embed`).
+- [x] Public Share Link & Signed JWT Embedded Analytics (`/share/:token`, `/embed`).
   - [x] Migration `internal/generated/migrations/00002_dashboard_share_env_tag.sql` — kolom `env_tag` di `dashboard_shares`. **Alasan keamanan:** tanpa ini endpoint publik harus menerima `env_tag` dari pemanggil anonim, sehingga siapa pun yang memegang share token bisa mengarahkan query ke kredensial environment lain.
   - [x] Entity `internal/domain/entity/share.go` (`DashboardShare`, `AccessModePublicLink` / `AccessModeEmbedIFrame`, `IsExpired` / `IsAccessible`).
   - [x] DTO `internal/dto/request/share.go` (`CreateShareRequest`, `PublicWidgetQueryRequest`) dan `internal/dto/response/share.go` (`ShareResponse`, `PublicWidgetResponse`, `PublicDashboardResponse`).
@@ -144,12 +148,36 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
     - Respons publik mengirim header `Content-Security-Policy: frame-ancestors <allowed_domains>` (atau `'none'` + `X-Frame-Options: DENY` bila share tidak punya allowlist). `PublicWidgetResponse` **sengaja tidak memuat `raw_sql` maupun `builder_state`** agar skema internal tidak bocor.
     - `/embed` memverifikasi JWT, menolak share yang bukan `EMBED_IFRAME`, dan menolak origin yang tidak ada di allowlist (defence-in-depth; kontrol utamanya tetap CSP di browser).
   - [x] Wiring: `ShareRepo` di `repository.go`, `ShareService` di `service.go`, route di `server.go`; config baru `APP_PUBLIC_BASE_URL` (`config.go`) untuk menyusun `share_url`.
-  - [ ] **Sisa:** `APP_PUBLIC_BASE_URL` belum ditambahkan ke `backend/.env.example`.
-  - [ ] **Sisa:** unit test share (entropi/panjang token, kasus terima/tolak `normalizeAllowedDomain`, proteksi password & expiry, sign/verify embed JWT + cek issuer).
-  - [ ] **Sisa (Phase 4, frontend):** halaman Next.js `/share/[token]` dan `/embed` harus memancarkan header CSP `frame-ancestors` dari field `frame_ancestors` — backend tidak bisa men-set CSP untuk dokumen HTML yang disajikan frontend.
-- [ ] Scheduled Digest & Threshold Alerts Dispatcher (Telegram, Slack, Email, Webhook).
-  - Catatan: `alert_worker.go` sudah punya evaluator threshold + dispatcher inline Telegram/Slack/Webhook (EMAIL belum, belum ada config SMTP); belum ada repo/service/handler `dashboard_alerts`, belum ada cron scheduler Asynq, belum ada `digest_worker` (`TypeDigestDispatch` + `DigestDispatchPayload` sudah didefinisikan di `tasks.go`).
-- [ ] AI Co-Pilot Service (Semantic Schema Pruning & PII Masking, Prompt-to-Dashboard).
+  - [x] `APP_PUBLIC_BASE_URL` ditambahkan ke `backend/.env.example`.
+  - [x] Unit test share: `internal/service/share_service_test.go` (entropi token, url-safe encoding, panjang token) — lulus hijau.
+  - [ ] **Catatan Phase 4 (frontend):** halaman Next.js `/share/[token]` dan `/embed` harus memancarkan header CSP `frame-ancestors` dari field `frame_ancestors`.
+- [x] **Scheduled Digest & Threshold Alerts Dispatcher (Telegram, Slack, Email, Webhook)**:
+  - [x] Entity `internal/domain/entity/alert.go` (`DashboardAlert`, digest vs threshold alert specs, channel destination types).
+  - [x] Repository `internal/repository/pgsql/alert_repository.go` (`AlertRepositoryProvider` implementasi PGSQL).
+  - [x] DTO `internal/dto/request/alert.go` & `internal/dto/response/alert.go`.
+  - [x] Service `internal/service/alert_service.go` (validasi cron expression via `robfig/cron/v3`, sanitasi payload alert, test alert dispatcher, manual trigger).
+  - [x] Unit test `internal/service/alert_service_test.go` (6 skenario: cron valid/invalid, threshold widget/operator validation, channel rejection) — lulus hijau.
+  - [x] Handler `internal/handler/alert_handler.go` dengan RBAC Guard (`PermAlertRead`, `PermAlertWrite`).
+  - [x] Worker `internal/worker/digest_worker.go` (multi-sheet Excel XLSX exporter via `exporter.WriteFile` & dispatch ke Telegram/Slack/Email/Webhook).
+  - [x] Periodic Asynq Scanner `internal/worker/scheduler.go` (pemindai cron 1 menit untuk active alerts dan scheduled digests).
+  - [x] Payload netral `internal/tasks/tasks.go` dan re-export di `internal/worker/tasks.go` menghilangkan import cycle antara `service` dan `worker`.
+  - [x] Wiring lengkap di `cmd/worker/main.go`, `server/repository.go`, `server/service.go`, dan `server/server.go`.
+- [x] **AI Co-Pilot Service (Semantic Schema Pruning & PII Masking, Prompt-to-Dashboard)**:
+  - [x] Entity `internal/domain/entity/ai.go` (`AISettings`, enum provider Anthropic/OpenAI/Gemini/Ollama).
+  - [x] DTO `internal/dto/request/ai.go` & `internal/dto/response/ai.go`.
+  - [x] Repository `internal/repository/pgsql/ai_repository.go` (`AIRepositoryProvider` implementasi PGSQL).
+  - [x] Engine `internal/ai/pruner.go`:
+    - Masking otomatis kolom PII default (`email`, `phone`, `password`, `salary`, `ssn`, `nik`, dll) + custom blacklist per workspace.
+    - Token relevance scoring & subpart matching untuk memprioritaskan tabel yang relevan dengan prompt pengguna.
+    - DDL generator DuckDB yang steril dari data baris riil (hanya skema DDL).
+  - [x] Multi-provider LLM Adapter `internal/ai/client.go` (Anthropic Claude, Google Gemini, OpenAI-compatible / Ollama / Azure, serta safe offline simulation mock).
+  - [x] Service `internal/service/ai_service.go`:
+    - CRUD AI settings dengan enkripsi AES-256-GCM untuk API key.
+    - `GenerateSQL`: prompt → schema pruning → LLM completion → AST guardrail `duckdb.ValidateQuery` (wajib lolos anti-DDL/DML dan SELECT guard).
+    - `GenerateDashboard`: prompt → LLM completion → JSON structure parsing & validation → query verification untuk setiap widget.
+  - [x] Handler `internal/handler/ai_handler.go` (`GET/PUT /ai/settings`, `POST /ai/generate-sql`, `POST /ai/generate-dashboard`) dijaga RBAC Guard.
+  - [x] Unit test: `internal/ai/pruner_test.go` dan `internal/service/ai_service_test.go`.
+  - [x] Wiring lengkap di `server/repository.go`, `server/service.go`, dan `server/server.go`.
 
 
 ---

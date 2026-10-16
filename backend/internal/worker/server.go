@@ -8,6 +8,7 @@ import (
 	"github.com/hibiken/asynq"
 	"muara.bi/core/internal/cache"
 	"muara.bi/core/internal/config"
+	"muara.bi/core/internal/repository/pgsql"
 	"muara.bi/core/internal/service"
 	"muara.bi/core/pkg/logging"
 )
@@ -23,6 +24,8 @@ type Server struct {
 func NewWorkerServer(
 	cfg *config.Config,
 	db *sql.DB,
+	dashboardRepo pgsql.DashboardRepositoryProvider,
+	widgetRepo pgsql.WidgetRepositoryProvider,
 	preparer *service.SessionPreparer,
 	access service.AccessServiceProvider,
 	queryCache *cache.QueryCache,
@@ -54,10 +57,12 @@ func NewWorkerServer(
 	queryWorker := NewQueryWorker(preparer, access, queryCache, logger)
 	exportWorker := NewExportWorker(db, preparer, access, logger)
 	alertWorker := NewAlertWorker(db, preparer, logger)
+	digestWorker := NewDigestWorker(db, dashboardRepo, widgetRepo, preparer, logger)
 
 	mux.HandleFunc(TypeQueryExecute, queryWorker.ProcessTask)
 	mux.HandleFunc(TypeExportJob, exportWorker.ProcessTask)
 	mux.HandleFunc(TypeAlertCheck, alertWorker.ProcessTask)
+	mux.HandleFunc(TypeDigestDispatch, digestWorker.ProcessTask)
 
 	return &Server{
 		srv:    srv,
