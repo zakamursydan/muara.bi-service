@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"muara.bi/core/internal/domain/entity"
 	"muara.bi/core/internal/limiter"
@@ -202,13 +203,7 @@ func (p *SessionPreparer) attachConnections(ctx context.Context, session duckdb.
 func attachConnection(ctx context.Context, session duckdb.Session, conn entity.DataConnection, cfg *entity.ConnectionConfig) ([]string, error) {
 	switch conn.DriverType {
 	case "postgres":
-		sslMode := cfg.SSLMode
-		if sslMode == "" {
-			sslMode = "disable"
-		}
-		dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-			cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, sslMode)
-		return nil, session.AttachPostgres(ctx, conn.AliasName, dsn)
+		return nil, session.AttachPostgres(ctx, conn.AliasName, postgresDSN(cfg))
 	case "mysql":
 		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
 		return nil, session.AttachMySQL(ctx, conn.AliasName, dsn)
@@ -257,4 +252,31 @@ func mongoURI(cfg *entity.ConnectionConfig) string {
 		uri.User = url.UserPassword(cfg.User, cfg.Password)
 	}
 	return uri.String()
+}
+
+// postgresDSN builds the libpq conninfo used by both schema discovery and the
+// DuckDB ATTACH. sslmode is defaulted in this one place: an empty value produced
+// `sslmode= sslmode=disable` before, and pgx rejects that with
+// "failed to configure TLS (sslmode is invalid)", so every SyncSchema on a
+// connection saved without ssl_mode failed.
+func postgresDSN(cfg *entity.ConnectionConfig) string {
+	sslMode := cfg.SSLMode
+	if sslMode == "" {
+		sslMode = "disable"
+	}
+	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		dsnValue(cfg.Host), cfg.Port, dsnValue(cfg.User), dsnValue(cfg.Password),
+		dsnValue(cfg.Database), dsnValue(sslMode))
+}
+
+// dsnValue quotes one libpq keyword=value entry. Credentials are user supplied,
+// so a space would split the value and let the rest be read as another
+// parameter; quoting also keeps a password out of the parser's way.
+func dsnValue(s string) string {
+	if !strings.ContainsAny(s, " \t\n'\\") {
+		return s
+	}
+	escaped := strings.ReplaceAll(s, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `'`, `\'`)
+	return "'" + escaped + "'"
 }

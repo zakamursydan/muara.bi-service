@@ -40,7 +40,7 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
 - **Update Terakhir:** 2026-10-31
 - **Fase Selesai:** Phase 1, Phase 2, Phase 3 (100% Backend Complete), Phase 4 (100% Frontend) & Phase 5 (E2E Integration, Docker Packaging & Testing)
 - **Fase Aktif:** Refactor lintas-produk **M1** (lihat `muara.bi-desktop/PLAN.md`) — engine analitik keluar `internal/` supaya dipakai ulang oleh muara.bi Desktop tanpa salinan kedua. Phase 1–5 tetap `[x]`.
-- **Subtask Saat Ini:** M1.4 dan M1.5 selesai. Sisa checklist M1 tinggal satu bukti `make image-core` (butuh daemon Docker aktif), lalu spike M0 desktop. Detail di dua blok §3 terakhir di bawah dan di PROGRESS desktop.
+- **Subtask Saat Ini:** M1.4 dan M1.5 selesai, plus bug DSN Postgres lama (`sslmode` ganda) ditutup. Sisa checklist M1 tinggal satu bukti `make image-core` (butuh daemon Docker aktif), lalu spike M0 desktop. Detail di tiga blok §3 terakhir di bawah dan di PROGRESS desktop.
 - **Kondisi Backend Terakhir yang Terverifikasi:**
   - Public Sharing & Signed JWT Embed teruji & terpasang.
   - Scheduled Digest & Threshold Alerts Dispatcher teruji & terhubung ke Asynq scheduler.
@@ -138,6 +138,28 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   menentukan profil mesin; field-nya sudah ditandai di `session_cgo.go`.
 - **Gerbang verifikasi:** `TestNormalizeMaxMemory` (CGO-free) + `TestEngineAppliesConfiguredMemoryBudget` dan
   `TestEngineRejectsUnusableMemoryBudget` (CGO) lolos; kedua modul hijau pada `CGO_ENABLED=1` dan `=0`, `gofmt -l` bersih.
+
+### Perbaikan DSN Postgres (2026-10-31, bug lama dari audit desktop)
+- **Gejalanya:** `SyncSchema` Postgres **selalu** gagal untuk koneksi yang disimpan tanpa `ssl_mode`.
+  `connection_service.go` dulu merakit `... sslmode=%s` dengan nilai kosong lalu **menempel** `sslmode=disable`
+  di belakangnya → `host=… sslmode= sslmode=disable`, dan `pgx.ParseConfig` menolak bentuk itu dengan
+  `failed to configure TLS (sslmode is invalid)`. Jalur query (`session_preparer.go`) meanwhile memberi default
+  `disable` sendiri, jadi dua jalur berperilaku berbeda — sumber kebohungan "Test Connection hijau, SyncSchema mati".
+- **Perbaikannya satu tempat:** `service.postgresDSN(cfg)` (`internal/service/session_preparer.go:262`) dipakai
+  **kedua** pemanggil (`connection_service.go:322` dan `attachConnection` di `session_preparer.go:206`), dengan
+  default `disable` dieksekusi sekali. Ini juga memangkas pekerjaan transport bastion (desktop M2): tinggal satu
+  perakit DSN yang perlu menunjuk `127.0.0.1:<port>` forwarder.
+- **Sekalian menutup injeksi di DSN:** `dsnValue` (`:275`) meng-quote nilai yang mengandung spasi/tab/newline/`'`/`\`
+  sesuai aturan libpq (`\'` dan `\\`). Sebelum ini, password berisi spasi memecah DSN jadi parameter tambahan —
+  kredensial bisa menyuntik `sslmode=disable` dan menurunkan TLS tanpa ada yang sadar.
+  Catatan pgx yang relevan untuk reviewer: `sslmode` **tidak** muncul di `RuntimeParams` (diasimilasi ke
+  `TLSConfig`/`Fallbacks`), jadi tes membandingkan bentuk `TLSConfig`, bukan string.
+- `ssl_mode` masih **tidak divalidasi** di `dto/request/connection.go:23` (nilai typo baru ketahuan saat koneksi
+  gagal, bukan sebagai 400), dan belum ada field CA privat (`rootcert`) — keduanya sengaja ditinggal untuk M2
+  (BRD desktop §10 butir 8 + 9-catatan-sisa), bukan bagian dari bug ini.
+- **Gerbang verifikasi:** 4 tes baru di `internal/service/session_preparer_test.go`, salah satunya membuktikan
+  bentuk DSN lama memang ditolak `pgx.ParseConfig` (jadi tesnya tidak melupakan bug yang ditutup).
+  `go test ./...` hijau di `CGO_ENABLED=1` dan `=0`, `gofmt -l` bersih.
 
 ### Paket Docker (Phase 5.1) — fakta teknis yang sudah diverifikasi
 - **Kemasan DuckDB:** `go-duckdb v1.8.5` membundel `libduckdb.a` untuk `linux_amd64`/`linux_arm64` (glibc + libstdc++), DuckDB internal versi **v1.1.3**, dan **tidak** punya build tag `STATIC_EXTENSIONS`. Karena itu: runtime image `debian:bookworm-slim` (bukan Alpine/musl), dan ekstensi `postgres`/`mysql`/`sqlite` dipre-bundle ke `/opt/duckdb/extensions`.

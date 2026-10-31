@@ -319,13 +319,7 @@ func (s *ConnectionService) SyncSchema(ctx context.Context, wsID, connID, envTag
 
 	// For Postgres: query information_schema.columns
 	if conn.DriverType == "postgres" {
-		dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-			cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.SSLMode)
-		if cfg.SSLMode == "" {
-			dsn += " sslmode=disable"
-		}
-
-		targetDB, err := sql.Open("pgx", dsn)
+		targetDB, err := sql.Open("pgx", postgresDSN(cfg))
 		if err != nil {
 			return fmt.Errorf("failed to connect to source db for schema discovery: %w", err)
 		}
