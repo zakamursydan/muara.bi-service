@@ -34,9 +34,15 @@ type cgoEngine struct {
 }
 
 func NewEngine(cfg GuardrailConfig) (Engine, error) {
+	maxMemory, err := cfg.maxMemory()
+	if err != nil {
+		return nil, err
+	}
 	return &cgoEngine{
-		maxMemory:          "2GB",
-		threads:            2,
+		maxMemory: maxMemory,
+		threads:   2,
+		// threads is deliberately not configurable yet: the CPU budget per
+		// session only makes sense once desktop M0 fixes the machine profile.
 		statementTimeout:   cfg.StatementTimeout,
 		extensionDirectory: cfg.ExtensionDirectory,
 	}, nil
@@ -61,7 +67,7 @@ func (e *cgoEngine) NewSession(ctx context.Context) (Session, error) {
 	// Apply strict safety bounds. There is no DuckDB `statement_timeout` setting,
 	// so the per-query deadline is enforced with a context in Query.
 	initStatements := []string{
-		fmt.Sprintf("SET max_memory='%s'", e.maxMemory),
+		"SET max_memory=" + quoteLiteral(e.maxMemory),
 		fmt.Sprintf("SET threads=%d", e.threads),
 	}
 	if e.extensionDirectory != "" {

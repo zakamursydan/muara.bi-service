@@ -30,9 +30,13 @@ type Config struct {
 type DuckDBConfig struct {
 	ExtensionDirectory string `env:"DUCKDB_EXTENSION_DIRECTORY" default:""`
 
+	// MaxMemory is the DuckDB memory budget of a single session, e.g. "2GB".
+	// It must carry a unit; the engine rejects a bare number at startup.
+	MaxMemory string `env:"DUCKDB_MAX_MEMORY" default:"2GB"`
+
 	// MaxConcurrentExecutions is how many DuckDB sessions may run at once across
-	// every API and worker process sharing this Redis. Each session is capped at
-	// 2GB by the engine, so the default assumes a host that can hold two of them.
+	// every API and worker process sharing this Redis. Each session may reserve up
+	// to DUCKDB_MAX_MEMORY, so size the two together.
 	MaxConcurrentExecutions int `env:"DUCKDB_MAX_CONCURRENCY" default:"2"`
 	// SlotLeaseSeconds is how long an abandoned slot is tolerated before it is
 	// reclaimed. It must exceed the longest guarded execution, otherwise a slow but

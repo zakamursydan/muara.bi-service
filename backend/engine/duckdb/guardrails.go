@@ -13,9 +13,10 @@ import (
 )
 
 var (
-	ErrForbiddenStatement = errors.New("forbidden statement: only SELECT queries are permitted")
-	ErrEmptyQuery         = errors.New("query cannot be empty")
-	ErrInvalidRLSRule     = errors.New("invalid row-level security rule")
+	ErrForbiddenStatement  = errors.New("forbidden statement: only SELECT queries are permitted")
+	ErrEmptyQuery          = errors.New("query cannot be empty")
+	ErrInvalidRLSRule      = errors.New("invalid row-level security rule")
+	ErrInvalidMemoryBudget = errors.New("invalid duckdb memory budget")
 )
 
 // rlsOperators is the closed set of comparisons an RLS rule may use. Values are
@@ -46,10 +47,36 @@ var templateParamPattern = regexp.MustCompile(`\{\{\s*([a-zA-Z0-9_]+)\s*\}\}`)
 // of a remote table would exhaust the session's memory budget.
 const DefaultMaxRows = 10000
 
+// DefaultMaxMemory is the per-session DuckDB memory budget used when the
+// deployment does not configure one. Sessions are per query, so this is not the
+// process total: DUCKDB_MAX_CONCURRENCY sessions may each hold this much.
+const DefaultMaxMemory = "2GB"
+
+// maxMemoryPattern accepts a positive number with an explicit DuckDB unit.
+var maxMemoryPattern = regexp.MustCompile(`(?i)^\d+(\.\d+)?(B|KB|MB|GB|TB)$`)
+
+// NormalizeMaxMemory validates a DuckDB memory budget such as "2GB" or "512MB"
+// and returns the default when empty. A bare number is rejected on purpose:
+// DuckDB reads "2048" as bytes, so a typo meant as 2GB would silently starve
+// every query instead of failing at startup.
+func NormalizeMaxMemory(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return DefaultMaxMemory, nil
+	}
+	if !maxMemoryPattern.MatchString(trimmed) {
+		return "", fmt.Errorf("%w: %q (want a number followed by B, KB, MB, GB or TB)", ErrInvalidMemoryBudget, trimmed)
+	}
+	return trimmed, nil
+}
+
 // GuardrailConfig holds execution limits
 type GuardrailConfig struct {
 	MaxRows          int           `json:"max_rows"`
 	StatementTimeout time.Duration `json:"statement_timeout"`
+	// MaxMemory is the DuckDB per-session memory budget, e.g. "2GB". Empty keeps
+	// DefaultMaxMemory.
+	MaxMemory string `json:"max_memory"`
 	// ExtensionDirectory is where DuckDB looks for already-installed extensions.
 	// Empty keeps DuckDB's default (the user home directory).
 	ExtensionDirectory string `json:"extension_directory"`
@@ -60,7 +87,13 @@ func DefaultGuardrailConfig() GuardrailConfig {
 	return GuardrailConfig{
 		MaxRows:          DefaultMaxRows,
 		StatementTimeout: 30 * time.Second,
+		MaxMemory:        DefaultMaxMemory,
 	}
+}
+
+// maxMemory resolves the budget a session should apply.
+func (c GuardrailConfig) maxMemory() (string, error) {
+	return NormalizeMaxMemory(c.MaxMemory)
 }
 
 // ValidateQuery inspects raw SQL against forbidden keywords

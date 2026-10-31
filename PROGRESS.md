@@ -40,7 +40,7 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
 - **Update Terakhir:** 2026-10-31
 - **Fase Selesai:** Phase 1, Phase 2, Phase 3 (100% Backend Complete), Phase 4 (100% Frontend) & Phase 5 (E2E Integration, Docker Packaging & Testing)
 - **Fase Aktif:** Refactor lintas-produk **M1** (lihat `muara.bi-desktop/PLAN.md`) — engine analitik keluar `internal/` supaya dipakai ulang oleh muara.bi Desktop tanpa salinan kedua. Phase 1–5 tetap `[x]`.
-- **Subtask Saat Ini:** M1.4 selesai — pemotongan baris kini kontrak engine (`QueryOptions` + `QueryResult.Truncated`/`TruncatedBy`), web tinggal merender. Sisa checklist M1: M1.5 `max_memory` jadi konfigurasi, lalu `make image-core` (butuh Docker aktif). Detail di §3 "Kontrak pemotongan" di bawah dan di PROGRESS desktop.
+- **Subtask Saat Ini:** M1.4 dan M1.5 selesai. Sisa checklist M1 tinggal satu bukti `make image-core` (butuh daemon Docker aktif), lalu spike M0 desktop. Detail di dua blok §3 terakhir di bawah dan di PROGRESS desktop.
 - **Kondisi Backend Terakhir yang Terverifikasi:**
   - Public Sharing & Signed JWT Embed teruji & terpasang.
   - Scheduled Digest & Threshold Alerts Dispatcher teruji & terhubung ke Asynq scheduler.
@@ -118,6 +118,26 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   di cap, `LIMIT` penulis lebih ketat dari cap, default platform, `source_cap`, `row_limit` mengalahkan `source_cap`),
   `TestPlanLimit` di `guardrails_test.go`, `TestCappedMongoViews` di `nosql_adapter_test.go`. Kedua modul hijau pada
   `CGO_ENABLED=1` dan `=0`, `gofmt -l` bersih. Worker alert (`MaxRows: 1`) dan digest tetap berperilaku sama.
+
+### Batas memori DuckDB jadi konfigurasi (M1.5, 2026-10-31)
+- **Yang berubah:** `GuardrailConfig.MaxMemory string` (default `duckdb.DefaultMaxMemory` = `"2GB"`, sama seperti
+  angka yang sebelumnya di-hardcode) dan `NewEngine` sekarang memvalidasi nilainya — konfigurasi salah **gagal di
+  startup**, bukan diam-diam memakai budget lama. Web mengambilnya dari `config.DuckDBConfig.MaxMemory`
+  (`DUCKDB_MAX_MEMORY`, default `2GB`) yang disalin di `internal/app/server/service.go:59`, diteruskan ke
+  `SET max_memory=` setiap sesi lewat `quoteLiteral`. Desktop nanti memakai field yang sama dari profilnya sendiri.
+- **Kenapa angka polos ditolak:** DuckDB membaca `"2048"` sebagai **byte**, jadi typo yang maksudnya 2 GB akan
+  membuat setiap query kehabisan memori. `NormalizeMaxMemory` hanya menerima angka + unit `B|KB|MB|GB|TB`
+  (case-insensitive, tanpa spasi) dan mengembalikan default saat kosong; tesnya juga menolak injeksi seperti
+  `"2GB; DROP TABLE t"`.
+- **Fakta DuckDB yang tercatat:** `"256MB"` disimpan sebagai 256 × 10⁶ byte tetapi `current_setting('max_memory')`
+  menampilkannya dalam MiB (`244.1 MiB`). Artinya label `2GB` hari ini = 1,86 GiB efektif, dan
+  **puncak pemakaian = `DUCKDB_MAX_CONCURRENCY × DUCKDB_MAX_MEMORY`** — komentar `.env.example` dan
+  `docker-compose.yml` sudah menghitungnya begitu. Tes `TestEngineAppliesConfiguredMemoryBudget` membandingkan
+  **byte**, bukan string, supaya perbedaan unit ini tidak membuat tes rapuh.
+- `threads` sengaja **masih** 2 per sesi (di luar M1.5): budget CPU per sesi baru masuk akal setelah desktop M0
+  menentukan profil mesin; field-nya sudah ditandai di `session_cgo.go`.
+- **Gerbang verifikasi:** `TestNormalizeMaxMemory` (CGO-free) + `TestEngineAppliesConfiguredMemoryBudget` dan
+  `TestEngineRejectsUnusableMemoryBudget` (CGO) lolos; kedua modul hijau pada `CGO_ENABLED=1` dan `=0`, `gofmt -l` bersih.
 
 ### Paket Docker (Phase 5.1) — fakta teknis yang sudah diverifikasi
 - **Kemasan DuckDB:** `go-duckdb v1.8.5` membundel `libduckdb.a` untuk `linux_amd64`/`linux_arm64` (glibc + libstdc++), DuckDB internal versi **v1.1.3**, dan **tidak** punya build tag `STATIC_EXTENSIONS`. Karena itu: runtime image `debian:bookworm-slim` (bukan Alpine/musl), dan ekstensi `postgres`/`mysql`/`sqlite` dipre-bundle ke `/opt/duckdb/extensions`.
@@ -316,7 +336,7 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   - Terpasang di jalur eksekusi: `SessionPreparer.Execute` mengambil slot *setelah* validasi + rewrite SQL (query yang pasti gagal tidak memakan slot) dan `defer release()`; `customerror.NewTooManyRequestsError` → `httputil.WriteTooManyRequestsResponse` (429) yang sebelumnya akan jatuh ke 500 lewat `WriteServiceError`.
   - Knob baru: `DUCKDB_MAX_CONCURRENCY` (2), `DUCKDB_QUEUE_TIMEOUT_SECONDS` (30), `DUCKDB_SLOT_LEASE_SECONDS` (120), `WORKER_CONCURRENCY` (4) — ada di `config.DuckDBConfig`/`Config`, `docker-compose.yml` anchor `x-core-env`, dan `.env.example`. `worker/server.go` tidak lagi hardcode `Concurrency: 10`; bobot antrean pindah ke `tasks.QueueWeights` satu-satunya sumber kebenaran.
   - Prioritas Asynq diverifikasi terhadap Redis hidup (`go test ./internal/tasks`): tiap tipe task benar-benar masuk antrean yang berbobot (alert→critical, query/digest→default, export→heavy) dibaca ulang lewat `asynq.Inspector`, termasuk retry dan timeout.
-  - Temuan: task `query:execute` tidak pernah memasang timeout, jadi Asynq memberi default **30 menit** — satu query macet menahan slot worker sangat lama. Sekarang diikat 90 detik (deadline antrean + statement timeout). Catatan: `max_memory` DuckDB masih hardcoded 2 GB/sesi di `session_cgo.go`, jadi `DUCKDB_MAX_CONCURRENCY × 2 GB` adalah memori puncak yang harus tersedia di host/container.
+  - Temuan: task `query:execute` tidak pernah memasang timeout, jadi Asynq memberi default **30 menit** — satu query macet menahan slot worker sangat lama. Sekarang diikat 90 detik (deadline antrean + statement timeout). Catatan: `max_memory` DuckDB masih hardcoded 2 GB/sesi di `session_cgo.go`, jadi `DUCKDB_MAX_CONCURRENCY × 2 GB` adalah memori puncak yang harus tersedia di host/container. *(Sudah tidak berlaku sejak M1.5 2026-10-31: angka itu kini `DUCKDB_MAX_MEMORY`/`GuardrailConfig.MaxMemory` — lihat §3.)*
 - [x] Cache & RLS verification tests.
   - RLS dieksekusi nyata (bukan sekadar cek string) di `backend/internal/duckdb/rls_execution_test.go` memakai pipeline yang sama dengan `SessionPreparer.Execute`: filter memotong 6 baris → 3 baris BRG-01 (Rp315.000), indeks parameter berlanjut (`{{channel}}`=$1, aturan RLS=$2), nilai `'BRG-01' OR '1'='1'` ter-bind (0 baris, bukan bocor), dan kolom guard wajib ada di proyeksi penulis SQL — kalau tidak, query gagal (fail-closed).
   - Cache diverifikasi terhadap Redis hidup (`MUARA_E2E_REDIS=127.0.0.1:6379 go test ./internal/cache -v`, DB 15, kunci dibersihkan sendiri): miss→eksekusi→hit tanpa eksekusi ulang, payload & metadata kolom utuh setelah round-trip JSON, `ForceRefresh` menjalankan ulang, dua scope RLS menghasilkan kunci berbeda sehingga tidak saling melayani, kedaluwarsa TTL, `InvalidateByWorkspace` tidak menyentuh workspace lain, dan error query tidak ikut tercache.

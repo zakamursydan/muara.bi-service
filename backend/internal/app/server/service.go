@@ -56,6 +56,7 @@ func NewService(
 
 	guardrails := duckdb.DefaultGuardrailConfig()
 	guardrails.ExtensionDirectory = cfg.DuckDB.ExtensionDirectory
+	guardrails.MaxMemory = cfg.DuckDB.MaxMemory
 
 	duckdbEngine, err := duckdb.NewEngine(guardrails)
 	if err != nil {

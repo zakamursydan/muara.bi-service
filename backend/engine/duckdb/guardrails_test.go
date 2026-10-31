@@ -102,6 +102,31 @@ func TestPlanLimit(t *testing.T) {
 	}
 }
 
+func TestNormalizeMaxMemory(t *testing.T) {
+	for _, ok := range []string{"2GB", "512MB", "8b", "0.5GB"} {
+		got, err := NormalizeMaxMemory(ok)
+		if err != nil {
+			t.Errorf("%q accepted: %v", ok, err)
+		}
+		if got != strings.TrimSpace(ok) {
+			t.Errorf("%q normalized to %q", ok, got)
+		}
+	}
+
+	// Empty means "use the platform default", not "unbounded".
+	if got, err := NormalizeMaxMemory("  "); err != nil || got != DefaultMaxMemory {
+		t.Errorf("empty falls back to default: %q err=%v", got, err)
+	}
+
+	// A bare number is DuckDB bytes, so "2048" meant as 2GB would starve every
+	// query; it has to fail at startup instead.
+	for _, bad := range []string{"2048", "2 GB", "large", "2GiB", "-2GB", "2GB; DROP TABLE t"} {
+		if got, err := NormalizeMaxMemory(bad); err == nil {
+			t.Errorf("%q rejected: got %q, err=nil", bad, got)
+		}
+	}
+}
+
 func TestTransformParameters(t *testing.T) {
 	raw := "SELECT * FROM orders WHERE customer_id = {{customer_id}} AND status = {{status}}"
 	params := map[string]any{
