@@ -158,6 +158,14 @@ func (s *ConnectionService) UpsertEnvironment(ctx context.Context, wsID, connID 
 		return nil, errors.New("env_tag is required (e.g. production, staging, sandbox)")
 	}
 
+	// Refuse an unrecognised ssl_mode here: it would otherwise be encrypted and
+	// stored, then surface much later as a TLS failure during connect or ATTACH.
+	sslMode, err := normalizeSSLMode(req.SSLMode)
+	if err != nil {
+		return nil, customerror.NewBadRequestError(err.Error(), err)
+	}
+	req.SSLMode = sslMode
+
 	// Prepare credential payload
 	cfgPayload := entity.ConnectionConfig{
 		Host:     req.Host,
@@ -319,7 +327,12 @@ func (s *ConnectionService) SyncSchema(ctx context.Context, wsID, connID, envTag
 
 	// For Postgres: query information_schema.columns
 	if conn.DriverType == "postgres" {
-		targetDB, err := sql.Open("pgx", postgresDSN(cfg))
+		dsn, err := postgresDSN(cfg)
+		if err != nil {
+			return customerror.NewBadRequestError(err.Error(), err)
+		}
+
+		targetDB, err := sql.Open("pgx", dsn)
 		if err != nil {
 			return fmt.Errorf("failed to connect to source db for schema discovery: %w", err)
 		}

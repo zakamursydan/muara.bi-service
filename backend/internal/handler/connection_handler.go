@@ -41,7 +41,7 @@ func (h *ConnectionHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	res, err := h.service.CreateConnection(r.Context(), wsID, req)
 	if err != nil {
-		httputil.WriteInternalServerErrorResponse(w, r, err.Error(), nil)
+		WriteServiceError(w, r, err)
 		return
 	}
 
@@ -71,7 +71,7 @@ func (h *ConnectionHandler) UpsertEnvironment(w http.ResponseWriter, r *http.Req
 
 	res, err := h.service.UpsertEnvironment(r.Context(), wsID, connID, req)
 	if err != nil {
-		httputil.WriteInternalServerErrorResponse(w, r, err.Error(), nil)
+		WriteServiceError(w, r, err)
 		return
 	}
 
@@ -98,7 +98,7 @@ func (h *ConnectionHandler) SyncSchema(w http.ResponseWriter, r *http.Request) {
 	envTag := chi.URLParam(r, "envTag")
 
 	if err := h.service.SyncSchema(r.Context(), wsID, connID, envTag); err != nil {
-		httputil.WriteInternalServerErrorResponse(w, r, err.Error(), nil)
+		WriteServiceError(w, r, err)
 		return
 	}
 

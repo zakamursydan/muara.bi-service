@@ -203,7 +203,11 @@ func (p *SessionPreparer) attachConnections(ctx context.Context, session duckdb.
 func attachConnection(ctx context.Context, session duckdb.Session, conn entity.DataConnection, cfg *entity.ConnectionConfig) ([]string, error) {
 	switch conn.DriverType {
 	case "postgres":
-		return nil, session.AttachPostgres(ctx, conn.AliasName, postgresDSN(cfg))
+		dsn, err := postgresDSN(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return nil, session.AttachPostgres(ctx, conn.AliasName, dsn)
 	case "mysql":
 		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
 		return nil, session.AttachMySQL(ctx, conn.AliasName, dsn)
@@ -254,19 +258,41 @@ func mongoURI(cfg *entity.ConnectionConfig) string {
 	return uri.String()
 }
 
+// postgresSSLModes is the closed set of sslmode values libpq accepts. Anything
+// else only surfaces as a TLS failure while connecting — after the typo has
+// already been saved — so it is refused where the profile is written.
+var postgresSSLModes = []string{"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
+
+// normalizeSSLMode validates a stored ssl_mode. Empty is a legitimate value and
+// becomes the engine default; an unrecognised one is rejected rather than
+// silently downgraded, because a misspelled "verify-full" means no cert check.
+func normalizeSSLMode(raw string) (string, error) {
+	mode := strings.TrimSpace(raw)
+	if mode == "" {
+		return "disable", nil
+	}
+	for _, allowed := range postgresSSLModes {
+		if mode == allowed {
+			return mode, nil
+		}
+	}
+	return "", fmt.Errorf("ssl_mode %q is not a libpq sslmode (want one of: %s)",
+		raw, strings.Join(postgresSSLModes, ", "))
+}
+
 // postgresDSN builds the libpq conninfo used by both schema discovery and the
 // DuckDB ATTACH. sslmode is defaulted in this one place: an empty value produced
 // `sslmode= sslmode=disable` before, and pgx rejects that with
 // "failed to configure TLS (sslmode is invalid)", so every SyncSchema on a
 // connection saved without ssl_mode failed.
-func postgresDSN(cfg *entity.ConnectionConfig) string {
-	sslMode := cfg.SSLMode
-	if sslMode == "" {
-		sslMode = "disable"
+func postgresDSN(cfg *entity.ConnectionConfig) (string, error) {
+	sslMode, err := normalizeSSLMode(cfg.SSLMode)
+	if err != nil {
+		return "", err
 	}
 	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		dsnValue(cfg.Host), cfg.Port, dsnValue(cfg.User), dsnValue(cfg.Password),
-		dsnValue(cfg.Database), dsnValue(sslMode))
+		dsnValue(cfg.Database), dsnValue(sslMode)), nil
 }
 
 // dsnValue quotes one libpq keyword=value entry. Credentials are user supplied,

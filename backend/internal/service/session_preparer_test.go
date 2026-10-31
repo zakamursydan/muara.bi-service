@@ -64,7 +64,7 @@ func TestPostgresDSNDefaultsSSLModeOnce(t *testing.T) {
 	cfg := &entity.ConnectionConfig{
 		Host: "dwh.internal", Port: 5432, User: "reader", Password: "secret", Database: "sales",
 	}
-	dsn := postgresDSN(cfg)
+	dsn := mustDSN(t, cfg)
 	if n := strings.Count(dsn, "sslmode="); n != 1 {
 		t.Fatalf("dsn = %q, want exactly one sslmode, got %d", dsn, n)
 	}
@@ -90,7 +90,7 @@ func TestPostgresDSNDefaultsSSLModeOnce(t *testing.T) {
 }
 
 func TestPostgresDSNKeepsConfiguredSSLMode(t *testing.T) {
-	parsed, err := pgx.ParseConfig(postgresDSN(&entity.ConnectionConfig{
+	parsed, err := pgx.ParseConfig(mustDSN(t, &entity.ConnectionConfig{
 		Host: "dwh.internal", Port: 5432, User: "reader", Database: "sales", SSLMode: "verify-full",
 	}))
 	if err != nil {
@@ -112,9 +112,10 @@ func TestPostgresDSNQuotesValuesWithSpaces(t *testing.T) {
 		SSLMode:  "require",
 	}
 
-	parsed, err := pgx.ParseConfig(postgresDSN(cfg))
+	dsn := mustDSN(t, cfg)
+	parsed, err := pgx.ParseConfig(dsn)
 	if err != nil {
-		t.Fatalf("pgx rejects the generated dsn: %v (%q)", err, postgresDSN(cfg))
+		t.Fatalf("pgx rejects the generated dsn: %v (%q)", err, dsn)
 	}
 	if parsed.User != cfg.User {
 		t.Errorf("user = %q, want %q", parsed.User, cfg.User)
@@ -136,7 +137,7 @@ func TestPostgresDSNDoesNotLetCredentialsAddParameters(t *testing.T) {
 		Database: "sales", SSLMode: "verify-full",
 	}
 
-	parsed, err := pgx.ParseConfig(postgresDSN(cfg))
+	parsed, err := pgx.ParseConfig(mustDSN(t, cfg))
 	if err != nil {
 		t.Fatalf("pgx rejects the generated dsn: %v", err)
 	}
@@ -148,5 +149,59 @@ func TestPostgresDSNDoesNotLetCredentialsAddParameters(t *testing.T) {
 	}
 	if parsed.Config.Password != cfg.Password {
 		t.Errorf("password = %q, want it preserved verbatim", parsed.Config.Password)
+	}
+}
+
+func mustDSN(t *testing.T, cfg *entity.ConnectionConfig) string {
+	t.Helper()
+	dsn, err := postgresDSN(cfg)
+	if err != nil {
+		t.Fatalf("postgresDSN: %v", err)
+	}
+	return dsn
+}
+
+func TestNormalizeSSLMode(t *testing.T) {
+	for _, mode := range postgresSSLModes {
+		got, err := normalizeSSLMode(mode)
+		if err != nil {
+			t.Errorf("%q accepted: %v", mode, err)
+		}
+		if got != mode {
+			t.Errorf("%q normalized to %q", mode, got)
+		}
+	}
+
+	// Surrounding space is a paste artifact, not a different mode.
+	if got, err := normalizeSSLMode("  require  "); err != nil || got != "require" {
+		t.Errorf("trimmed value = %q, err = %v", got, err)
+	}
+
+	// Empty means "the caller never chose", which is the engine default.
+	if got, err := normalizeSSLMode(""); err != nil || got != "disable" {
+		t.Errorf("empty = %q, err = %v; want disable", got, err)
+	}
+
+	// pgx only reports these while connecting, i.e. after the typo is stored and
+	// as a confusing TLS error. "verify-full" misspelled as "verify-full1" would
+	// otherwise silently mean no certificate check at all.
+	for _, bad := range []string{"verify_full", "verify", "TRUE", "no-ssl", "require sslmode=disable"} {
+		got, err := normalizeSSLMode(bad)
+		if err == nil {
+			t.Errorf("%q rejected: got %q, err = nil", bad, got)
+		}
+		if got != "" {
+			t.Errorf("%q returned a usable value %q", bad, got)
+		}
+	}
+}
+
+// A stored profile can predate the write-time check, so the DSN builder refuses
+// junk rather than defaulting it away.
+func TestPostgresDSNRejectsUnknownSSLMode(t *testing.T) {
+	if _, err := postgresDSN(&entity.ConnectionConfig{
+		Host: "dwh.internal", Port: 5432, User: "reader", Database: "sales", SSLMode: "verify",
+	}); err == nil {
+		t.Fatal("an unrecognised ssl_mode must fail loudly, not fall back to another mode")
 	}
 }

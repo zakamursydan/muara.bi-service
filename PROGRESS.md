@@ -40,7 +40,9 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
 - **Update Terakhir:** 2026-10-31
 - **Fase Selesai:** Phase 1, Phase 2, Phase 3 (100% Backend Complete), Phase 4 (100% Frontend) & Phase 5 (E2E Integration, Docker Packaging & Testing)
 - **Fase Aktif:** Refactor lintas-produk **M1** (lihat `muara.bi-desktop/PLAN.md`) — engine analitik keluar `internal/` supaya dipakai ulang oleh muara.bi Desktop tanpa salinan kedua. Phase 1–5 tetap `[x]`.
-- **Subtask Saat Ini:** M1.4 dan M1.5 selesai, plus bug DSN Postgres lama (`sslmode` ganda) ditutup. Sisa checklist M1 tinggal satu bukti `make image-core` (butuh daemon Docker aktif), lalu spike M0 desktop. Detail di tiga blok §3 terakhir di bawah dan di PROGRESS desktop.
+- **Subtask Saat Ini:** M1.4 dan M1.5 selesai, plus bug DSN Postgres lama (`sslmode` ganda) ditutup dan
+  `ssl_mode` kini divalidasi (400, bukan gagal koneksi). Sisa checklist M1 tinggal satu bukti `make image-core`
+  (butuh daemon Docker aktif), lalu spike M0 desktop. Detail di tiga blok §3 terakhir di bawah dan di PROGRESS desktop.
 - **Kondisi Backend Terakhir yang Terverifikasi:**
   - Public Sharing & Signed JWT Embed teruji & terpasang.
   - Scheduled Digest & Threshold Alerts Dispatcher teruji & terhubung ke Asynq scheduler.
@@ -143,23 +145,40 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
 - **Gejalanya:** `SyncSchema` Postgres **selalu** gagal untuk koneksi yang disimpan tanpa `ssl_mode`.
   `connection_service.go` dulu merakit `... sslmode=%s` dengan nilai kosong lalu **menempel** `sslmode=disable`
   di belakangnya → `host=… sslmode= sslmode=disable`, dan `pgx.ParseConfig` menolak bentuk itu dengan
-  `failed to configure TLS (sslmode is invalid)`. Jalur query (`session_preparer.go`) meanwhile memberi default
+  `failed to configure TLS (sslmode is invalid)`. Jalur query (`session_preparer.go`) memberi default
   `disable` sendiri, jadi dua jalur berperilaku berbeda — sumber kebohungan "Test Connection hijau, SyncSchema mati".
-- **Perbaikannya satu tempat:** `service.postgresDSN(cfg)` (`internal/service/session_preparer.go:262`) dipakai
-  **kedua** pemanggil (`connection_service.go:322` dan `attachConnection` di `session_preparer.go:206`), dengan
+- **Perbaikannya satu tempat:** `service.postgresDSN(cfg)` (`internal/service/session_preparer.go:288`) dipakai
+  **kedua** pemanggil (`connection_service.go:330` dan `attachConnection` di `session_preparer.go:206`), dengan
   default `disable` dieksekusi sekali. Ini juga memangkas pekerjaan transport bastion (desktop M2): tinggal satu
   perakit DSN yang perlu menunjuk `127.0.0.1:<port>` forwarder.
-- **Sekalian menutup injeksi di DSN:** `dsnValue` (`:275`) meng-quote nilai yang mengandung spasi/tab/newline/`'`/`\`
+- **Sekalian menutup injeksi di DSN:** `dsnValue` (`:301`) meng-quote nilai yang mengandung spasi/tab/newline/`'`/`\`
   sesuai aturan libpq (`\'` dan `\\`). Sebelum ini, password berisi spasi memecah DSN jadi parameter tambahan —
   kredensial bisa menyuntik `sslmode=disable` dan menurunkan TLS tanpa ada yang sadar.
   Catatan pgx yang relevan untuk reviewer: `sslmode` **tidak** muncul di `RuntimeParams` (diasimilasi ke
   `TLSConfig`/`Fallbacks`), jadi tes membandingkan bentuk `TLSConfig`, bukan string.
-- `ssl_mode` masih **tidak divalidasi** di `dto/request/connection.go:23` (nilai typo baru ketahuan saat koneksi
-  gagal, bukan sebagai 400), dan belum ada field CA privat (`rootcert`) — keduanya sengaja ditinggal untuk M2
-  (BRD desktop §10 butir 8 + 9-catatan-sisa), bukan bagian dari bug ini.
-- **Gerbang verifikasi:** 4 tes baru di `internal/service/session_preparer_test.go`, salah satunya membuktikan
-  bentuk DSN lama memang ditolak `pgx.ParseConfig` (jadi tesnya tidak melupakan bug yang ditutup).
-  `go test ./...` hijau di `CGO_ENABLED=1` dan `=0`, `gofmt -l` bersih.
+- **`ssl_mode` sekarang divalidasi (lanjutan 2026-10-31):** `normalizeSSLMode` (`session_preparer.go:269`,
+  daftar nilainya di `:264`)
+  hanya menerima enam nilai libpq — `disable · allow · prefer · require · verify-ca · verify-full` — dengan
+  spasi tepi di-trim dan kosong berarti default `disable`. Ditutup di **dua** titik: `UpsertEnvironment`
+  (`connection_service.go:163-166`) menolak sebelum payload dienkripsi & disimpan (400 dengan daftar nilai yang
+  boleh), dan `postgresDSN` ikut menolak supaya profil lama yang sudah tersimpan tidak diam-diam turun ke
+  mode lain — typo `verify` alih-alih `verify-full` berarti *tanpa pemeriksaan sertifikat*, jadi tidak boleh
+  diredam. `postgresDSN` karena itu kini mengembalikan `(string, error)`.
+  Frontend tidak berubah: `environment-form.tsx:193` memang sudah render `<Select>` dengan enam nilai yang sama
+  — yang hilang hanya gerbang sisi API (klien lain bisa mengirim apa pun).
+- **Perbaikan ikutan di handler:** `Create`, `UpsertEnvironment` dan `SyncSchema` di
+  [internal/handler/connection_handler.go](backend/internal/handler/connection_handler.go) memetakan *semua*
+  error service ke **500** lewat `WriteInternalServerErrorResponse`, termasuk `customerror.NewBadRequestError`
+  yang dibuat kode ini sendiri (validasi `alias_name` dan sekarang `ssl_mode`). Ketiganya memakai
+  `WriteServiceError` sehingga 400 benar-benar jadi 400 — tanpa itu, validasi apa pun tidak akan pernah
+  terlihat oleh pemanggil API. `List`/`Test` dibiarkan (errornya murni internal).
+- **Belum ada tempat untuk CA privat (`rootcert`)** — default `disable` tetap salah untuk DB internal
+  self-signed; itu BRD desktop §10 butir 8, masuk M2 (butir 9 sudah ditutup).
+- **Gerbang verifikasi:** 6 tes di `internal/service/session_preparer_test.go` (4 DSN + `TestNormalizeSSLMode`
+  + `TestPostgresDSNRejectsUnknownSSLMode`), salah satunya membuktikan bentuk DSN lama memang ditolak
+  `pgx.ParseConfig`. `go test ./...` hijau di `CGO_ENABLED=1` dan `=0`, `gofmt -l` bersih.
+  **Belum diuji lewat HTTP:** daemon Docker mati, jadi API + Postgres/Redis lokal tidak jalan dan biner yang
+  ter-smoke-test sebelumnya adalah build lama — validasi ini baru terbukti di level unit.
 
 ### Paket Docker (Phase 5.1) — fakta teknis yang sudah diverifikasi
 - **Kemasan DuckDB:** `go-duckdb v1.8.5` membundel `libduckdb.a` untuk `linux_amd64`/`linux_arm64` (glibc + libstdc++), DuckDB internal versi **v1.1.3**, dan **tidak** punya build tag `STATIC_EXTENSIONS`. Karena itu: runtime image `debian:bookworm-slim` (bukan Alpine/musl), dan ekstensi `postgres`/`mysql`/`sqlite` dipre-bundle ke `/opt/duckdb/extensions`.
