@@ -2,126 +2,53 @@
 
 package duckdb
 
-import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"strings"
-	"sync"
-	"time"
-)
+import "context"
 
-type fallbackEngine struct {
-	cfg GuardrailConfig
-}
+// This build has no analytical engine at all. DuckDB is a C library, so the only
+// honest behaviour here is to fail: a stub that returned rows would let a
+// CGO-less release build report fabricated numbers as real results.
+// The types remain declared so the package still compiles (and `go vet`, lint
+// and editor tooling work) on machines without a C toolchain.
 
-// NewEngine creates an analytical engine instance. When CGO is not enabled, this fallback engine operates.
+type disabledEngine struct{}
+
+// NewEngine always fails without CGO.
 func NewEngine(cfg GuardrailConfig) (Engine, error) {
-	return &fallbackEngine{cfg: cfg}, nil
+	return nil, ErrCGODisabled
 }
 
-func (e *fallbackEngine) Close() error {
-	return nil
+func (disabledEngine) NewSession(ctx context.Context) (Session, error) { return nil, ErrCGODisabled }
+func (disabledEngine) Close() error                                    { return ErrCGODisabled }
+
+type disabledSession struct{}
+
+func (disabledSession) AttachPostgres(ctx context.Context, alias string, dsn string) error {
+	return ErrCGODisabled
 }
 
-type fallbackSession struct {
-	mu          sync.RWMutex
-	views       map[string]string
-	jsonTables  map[string][]map[string]any
-	attachments map[string]string
+func (disabledSession) AttachMySQL(ctx context.Context, alias string, dsn string) error {
+	return ErrCGODisabled
 }
 
-func (e *fallbackEngine) NewSession(ctx context.Context) (Session, error) {
-	return &fallbackSession{
-		views:       make(map[string]string),
-		jsonTables:  make(map[string][]map[string]any),
-		attachments: make(map[string]string),
-	}, nil
+func (disabledSession) AttachSQLite(ctx context.Context, alias string, path string) error {
+	return ErrCGODisabled
 }
 
-func (s *fallbackSession) AttachPostgres(ctx context.Context, alias string, dsn string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.attachments[alias] = "postgres:" + dsn
-	return nil
+func (disabledSession) RegisterTempView(ctx context.Context, viewName string, query string) error {
+	return ErrCGODisabled
 }
 
-func (s *fallbackSession) AttachMySQL(ctx context.Context, alias string, dsn string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.attachments[alias] = "mysql:" + dsn
-	return nil
+func (disabledSession) RegisterJSONData(ctx context.Context, viewName string, jsonData []byte) error {
+	return ErrCGODisabled
 }
 
-func (s *fallbackSession) AttachSQLite(ctx context.Context, alias string, path string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.attachments[alias] = "sqlite:" + path
-	return nil
+func (disabledSession) Query(ctx context.Context, sqlQuery string, args ...any) (*QueryResult, error) {
+	return nil, ErrCGODisabled
 }
 
-func (s *fallbackSession) RegisterTempView(ctx context.Context, viewName string, query string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.views[viewName] = query
-	return nil
-}
+func (disabledSession) Close() error { return ErrCGODisabled }
 
-func (s *fallbackSession) RegisterJSONData(ctx context.Context, viewName string, jsonData []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var records []map[string]any
-	if err := json.Unmarshal(jsonData, &records); err != nil {
-		return fmt.Errorf("failed to parse json records: %w", err)
-	}
-
-	s.jsonTables[viewName] = records
-	return nil
-}
-
-func (s *fallbackSession) Query(ctx context.Context, sqlQuery string, args ...any) (*QueryResult, error) {
-	start := time.Now()
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	// Check if querying a registered JSON table directly
-	for tblName, records := range s.jsonTables {
-		if strings.Contains(strings.ToLower(sqlQuery), strings.ToLower(tblName)) {
-			var cols []ColumnMeta
-			if len(records) > 0 {
-				for k := range records[0] {
-					cols = append(cols, ColumnMeta{Name: k, Type: "VARCHAR"})
-				}
-			}
-			return &QueryResult{
-				Columns:    cols,
-				Rows:       records,
-				RowCount:   int64(len(records)),
-				DurationMs: time.Since(start).Milliseconds(),
-			}, nil
-		}
-	}
-
-	// Default fallback analytical simulation response
-	return &QueryResult{
-		Columns: []ColumnMeta{
-			{Name: "status", Type: "VARCHAR"},
-			{Name: "message", Type: "VARCHAR"},
-		},
-		Rows: []map[string]any{
-			{"status": "OK", "message": "query executed via fallback engine"},
-		},
-		RowCount:   1,
-		DurationMs: time.Since(start).Milliseconds(),
-	}, nil
-}
-
-func (s *fallbackSession) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.views = nil
-	s.jsonTables = nil
-	s.attachments = nil
-	return nil
-}
+var (
+	_ Engine  = disabledEngine{}
+	_ Session = disabledSession{}
+)

@@ -3,6 +3,7 @@ package duckdb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"testing"
@@ -16,6 +17,9 @@ func newGuardrailSession(t *testing.T) Session {
 	t.Helper()
 
 	engine, err := NewEngine(DefaultGuardrailConfig())
+	if errors.Is(err, ErrCGODisabled) {
+		t.Skip(ErrCGODisabled.Error())
+	}
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}

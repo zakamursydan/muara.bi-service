@@ -2,6 +2,7 @@ package duckdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -29,6 +30,9 @@ func TestFederatedPostgresMongo(t *testing.T) {
 
 	ctx := context.Background()
 	engine, err := NewEngine(DefaultGuardrailConfig())
+	if errors.Is(err, ErrCGODisabled) {
+		t.Skip(ErrCGODisabled.Error())
+	}
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}

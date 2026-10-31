@@ -1,6 +1,14 @@
 package duckdb
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrCGODisabled is returned when the binary was built without CGO. DuckDB is a
+// C library, so an analytical session cannot exist in that build; callers must
+// refuse to start rather than serve results from a stub.
+var ErrCGODisabled = errors.New("duckdb engine unavailable: binary built without CGO (rebuild with CGO_ENABLED=1 and a C toolchain)")
 
 // ColumnMeta describes a column in the query result
 type ColumnMeta struct {

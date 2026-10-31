@@ -1,3 +1,5 @@
+//go:build cgo
+
 // Command duckdb-bundle materialises the DuckDB connector extensions into a
 // fixed directory so the production image can ship them and a container with no
 // network egress can still ATTACH external databases.

@@ -2,11 +2,15 @@ package duckdb
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
 func TestEngine_Lifecycle(t *testing.T) {
 	engine, err := NewEngine(DefaultGuardrailConfig())
+	if errors.Is(err, ErrCGODisabled) {
+		t.Skip(ErrCGODisabled.Error())
+	}
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
