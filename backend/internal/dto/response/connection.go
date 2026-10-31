@@ -11,7 +11,7 @@ type ConnectionResponse struct {
 	AliasName    string                    `json:"alias_name"`
 	Category     string                    `json:"category"`
 	DriverType   string                    `json:"driver_type"`
-	Environments []EnvironmentInfoResponse `json:"environments,omitempty"`
+	Environments []EnvironmentInfoResponse `json:"environments"`
 	CreatedAt    time.Time                 `json:"created_at"`
 }
 

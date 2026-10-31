@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -11,24 +10,25 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
+	"muara.bi/core/internal/domain/entity"
 	"muara.bi/core/internal/service"
 	"muara.bi/core/pkg/logging"
 )
 
 // AlertWorker evaluates threshold queries and dispatches notifications
 type AlertWorker struct {
-	db         *sql.DB
-	preparer   *service.SessionPreparer
-	httpClient *http.Client
-	logger     *logging.Logger
+	db       *sql.DB
+	preparer *service.SessionPreparer
+	notifier *Notifier
+	logger   *logging.Logger
 }
 
 func NewAlertWorker(db *sql.DB, preparer *service.SessionPreparer, logger *logging.Logger) *AlertWorker {
 	return &AlertWorker{
-		db:         db,
-		preparer:   preparer,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
-		logger:     logger,
+		db:       db,
+		preparer: preparer,
+		notifier: NewNotifier(&http.Client{Timeout: 10 * time.Second}, logger),
+		logger:   logger,
 	}
 }
 
@@ -127,62 +127,20 @@ func evaluateCondition(val float64, op string, threshold float64) bool {
 }
 
 func (w *AlertWorker) dispatchNotification(ctx context.Context, payload AlertCheckPayload, metricVal float64) error {
+	if payload.Channel == entity.ChannelWebhook {
+		return w.notifier.PostJSON(ctx, payload.RecipientJSON, map[string]any{
+			"alert_id":     payload.AlertID,
+			"title":        payload.Title,
+			"metric_value": metricVal,
+			"operator":     payload.Operator,
+			"threshold":    payload.ThresholdValue,
+			"env_tag":      payload.EnvTag,
+			"triggered_at": time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+
 	message := fmt.Sprintf("🚨 [muara.bi Alert Triggered]\nTitle: %s\nMetric: %f %s Threshold: %f\nEnvironment: %s\nTime: %s",
 		payload.Title, metricVal, payload.Operator, payload.ThresholdValue, payload.EnvTag, time.Now().Format(time.RFC3339))
 
-	var recipient map[string]any
-	_ = json.Unmarshal([]byte(payload.RecipientJSON), &recipient)
-
-	switch payload.Channel {
-	case "SLACK":
-		webhookURL, _ := recipient["webhook_url"].(string)
-		if webhookURL != "" {
-			body, _ := json.Marshal(map[string]string{"text": message})
-			req, _ := http.NewRequestWithContext(ctx, "POST", webhookURL, bytes.NewBuffer(body))
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := w.httpClient.Do(req)
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-		}
-	case "TELEGRAM":
-		botToken, _ := recipient["bot_token"].(string)
-		chatID, _ := recipient["chat_id"].(string)
-		if botToken != "" && chatID != "" {
-			apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
-			body, _ := json.Marshal(map[string]string{"chat_id": chatID, "text": message})
-			req, _ := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBuffer(body))
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := w.httpClient.Do(req)
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-		}
-	case "WEBHOOK":
-		webhookURL, _ := recipient["webhook_url"].(string)
-		if webhookURL != "" {
-			payloadBytes, _ := json.Marshal(map[string]any{
-				"alert_id":     payload.AlertID,
-				"title":        payload.Title,
-				"metric_value": metricVal,
-				"operator":     payload.Operator,
-				"threshold":    payload.ThresholdValue,
-				"env_tag":      payload.EnvTag,
-				"triggered_at": time.Now().UTC().Format(time.RFC3339),
-			})
-			req, _ := http.NewRequestWithContext(ctx, "POST", webhookURL, bytes.NewBuffer(payloadBytes))
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := w.httpClient.Do(req)
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-		}
-	default:
-		w.logger.Info(fmt.Sprintf("Alert notification logged (no external dispatcher for channel=%s): %s", payload.Channel, message))
-	}
-
-	return nil
+	return w.notifier.SendText(ctx, payload.Channel, payload.RecipientJSON, message)
 }

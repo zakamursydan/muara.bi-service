@@ -7,6 +7,7 @@ import (
 
 	"github.com/pressly/goose/v3"
 	"muara.bi/core/internal/config"
+	"muara.bi/core/internal/generated"
 	"muara.bi/core/pkg/logging"
 )
 
@@ -41,11 +42,13 @@ func RunMigration(ctx context.Context, cfg *config.Config, log *logging.Logger) 
 
 	log.Info("Running PostgreSQL metadata database migrations via Goose...")
 
+	goose.SetBaseFS(generated.Migrations)
+
 	if err := goose.SetDialect("postgres"); err != nil {
 		return fmt.Errorf("failed to set goose dialect: %w", err)
 	}
 
-	migrationDir := "./internal/generated/migrations"
+	migrationDir := "migrations"
 	if err := goose.Up(db, migrationDir); err != nil {
 		log.Error(fmt.Sprintf("Migration failed: %s", err.Error()))
 		return err

@@ -54,6 +54,20 @@ func NewAlertService(
 	}
 }
 
+// validateRecipient rejects a channel that has no usable target. It applies the
+// same rules the dispatcher uses, so an alert that saves is an alert that can
+// send.
+func validateRecipient(channel string, raw json.RawMessage) (json.RawMessage, error) {
+	recipient, err := entity.ParseAlertRecipient(raw)
+	if err != nil {
+		return nil, customerror.NewBadRequestError("recipient_config must be a JSON object", err)
+	}
+	if err := recipient.ValidateFor(channel); err != nil {
+		return nil, customerror.NewBadRequestError(err.Error(), nil)
+	}
+	return raw, nil
+}
+
 func (s *AlertService) Create(ctx context.Context, wsID, dashID, userID string, req request.CreateAlertRequest) (*response.AlertResponse, error) {
 	// 1. Verify dashboard belongs to workspace
 	dash, err := s.dashboardRepo.GetDashboardByID(ctx, wsID, dashID)
@@ -117,10 +131,11 @@ func (s *AlertService) Create(ctx context.Context, wsID, dashID, userID string, 
 		}
 	}
 
-	// Recipient config validation
-	recipientBytes := req.RecipientConfig
-	if len(recipientBytes) == 0 {
-		recipientBytes = json.RawMessage("{}")
+	// 5. Validate the delivery target before saving. An alert with no usable
+	// recipient otherwise looks healthy and then never delivers.
+	recipientBytes, err := validateRecipient(channel, req.RecipientConfig)
+	if err != nil {
+		return nil, err
 	}
 
 	isActive := true
@@ -225,8 +240,15 @@ func (s *AlertService) Update(ctx context.Context, wsID, alertID string, req req
 	if req.ThresholdValue != nil {
 		existing.ThresholdValue = req.ThresholdValue
 	}
+	// A recipient is only re-checked when it or the channel changed, so an
+	// alert saved before this validation stays editable for unrelated fields.
+	// The dispatcher still refuses to pretend such an alert was delivered.
 	if len(req.RecipientConfig) > 0 {
-		existing.RecipientConfig = req.RecipientConfig
+		recipientBytes, err := validateRecipient(existing.Channel, req.RecipientConfig)
+		if err != nil {
+			return nil, err
+		}
+		existing.RecipientConfig = recipientBytes
 	}
 	if req.EnvTag != "" {
 		existing.EnvTag = NormalizeEnvTag(req.EnvTag)
@@ -264,6 +286,12 @@ func (s *AlertService) TestAlert(ctx context.Context, wsID, alertID string) erro
 
 	if s.asynqClient == nil {
 		return customerror.NewInternalError("asynq client is not available to dispatch test alert", nil)
+	}
+
+	// A test run only proves delivery, so an unusable recipient is reported now
+	// instead of failing later inside the worker.
+	if _, err := validateRecipient(alert.Channel, alert.RecipientConfig); err != nil {
+		return err
 	}
 
 	projID, _ := s.dashboardRepo.GetProjectIDByDashboard(ctx, wsID, alert.DashboardID)

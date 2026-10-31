@@ -57,6 +57,23 @@ func TestApplyLimit(t *testing.T) {
 	if res2 != q2 {
 		t.Errorf("expected unmodified limit, got: %s", res2)
 	}
+
+	// An author LIMIT may only narrow the cap, never widen it.
+	res3 := ApplyLimit("SELECT * FROM transactions LIMIT 500000", 1000)
+	if res3 != "SELECT * FROM transactions LIMIT 1000" {
+		t.Errorf("expected clamp to 1000, got: %s", res3)
+	}
+
+	res4 := ApplyLimit("SELECT * FROM transactions LIMIT 500000 OFFSET 10", 1000)
+	if res4 != "SELECT * FROM transactions LIMIT 1000 OFFSET 10" {
+		t.Errorf("expected offset preserved, got: %s", res4)
+	}
+
+	// A LIMIT buried in a subquery does not bound the outer row count.
+	res5 := ApplyLimit("SELECT * FROM (SELECT id FROM t LIMIT 99999) s", 1000)
+	if !strings.HasSuffix(res5, "LIMIT 1000") {
+		t.Errorf("expected outer limit appended, got: %s", res5)
+	}
 }
 
 func TestTransformParameters(t *testing.T) {

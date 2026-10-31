@@ -2,10 +2,13 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/url"
 
 	"muara.bi/core/internal/domain/entity"
 	"muara.bi/core/internal/duckdb"
+	"muara.bi/core/internal/limiter"
 	"muara.bi/core/internal/repository/pgsql"
 	"muara.bi/core/pkg/customerror"
 	"muara.bi/core/pkg/logging"
@@ -42,6 +45,7 @@ type SessionPreparer struct {
 	connRepo     pgsql.ConnectionRepositoryProvider
 	semanticRepo pgsql.SemanticRepositoryProvider
 	connService  ConnectionServiceProvider
+	slots        *limiter.Semaphore
 	logger       *logging.Logger
 }
 
@@ -50,6 +54,7 @@ func NewSessionPreparer(
 	connRepo pgsql.ConnectionRepositoryProvider,
 	semanticRepo pgsql.SemanticRepositoryProvider,
 	connService ConnectionServiceProvider,
+	slots *limiter.Semaphore,
 	logger *logging.Logger,
 ) *SessionPreparer {
 	return &SessionPreparer{
@@ -57,6 +62,7 @@ func NewSessionPreparer(
 		connRepo:     connRepo,
 		semanticRepo: semanticRepo,
 		connService:  connService,
+		slots:        slots,
 		logger:       logger,
 	}
 }
@@ -90,6 +96,18 @@ func (p *SessionPreparer) Execute(ctx context.Context, q PreparedQuery) (*duckdb
 	}
 	sqlText = duckdb.ApplyLimit(sqlText, maxRows)
 
+	// The budget is taken after the cheap validation and SQL rewrite, so a query
+	// that could never run does not consume a slot or make a valid one wait.
+	release, err := p.slots.Acquire(ctx)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil, err
+		}
+		return nil, customerror.NewTooManyRequestsError(
+			"the analytical engine is at capacity, try again shortly", err)
+	}
+	defer release()
+
 	session, err := p.engine.NewSession(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create analytical session: %w", err)
@@ -99,7 +117,9 @@ func (p *SessionPreparer) Execute(ctx context.Context, q PreparedQuery) (*duckdb
 	if err := p.mountSemanticModels(ctx, session, q); err != nil {
 		return nil, err
 	}
-	p.attachConnections(ctx, session, q.WorkspaceID, NormalizeEnvTag(q.EnvTag))
+	if err := p.attachConnections(ctx, session, q.WorkspaceID, NormalizeEnvTag(q.EnvTag)); err != nil {
+		return nil, err
+	}
 
 	return session.Query(ctx, sqlText, args...)
 }
@@ -138,22 +158,36 @@ func (p *SessionPreparer) mountSemanticModels(ctx context.Context, session duckd
 // attachConnections binds every workspace alias that has a credential profile
 // for the active environment tag. Aliases without a matching profile are
 // skipped so one unconfigured environment cannot break unrelated queries.
-func (p *SessionPreparer) attachConnections(ctx context.Context, session duckdb.Session, wsID, envTag string) {
+func (p *SessionPreparer) attachConnections(ctx context.Context, session duckdb.Session, wsID, envTag string) error {
 	conns, err := p.connRepo.ListConnections(ctx, wsID)
 	if err != nil {
-		p.logger.Warn(fmt.Sprintf("failed to list connections for workspace %s: %v", wsID, err))
-		return
+		return fmt.Errorf("failed to list workspace connections: %w", err)
 	}
 
+	attempted, failed := 0, 0
+	var lastErr error
 	for _, conn := range conns {
 		cfg, _, err := p.connService.GetDecryptedConfig(ctx, wsID, conn.ID, envTag)
 		if err != nil || cfg == nil {
 			continue
 		}
+		attempted++
 		if err := attachConnection(ctx, session, conn, cfg); err != nil {
+			failed++
+			lastErr = err
 			p.logger.Warn(fmt.Sprintf("failed to attach alias %s (env=%s): %v", conn.AliasName, envTag, err))
 		}
 	}
+
+	// When every source configured for this environment failed, the query would
+	// only die later on an unrelated "table does not exist" catalog error.
+	if attempted > 0 && failed == attempted {
+		return customerror.NewBadRequestError(
+			fmt.Sprintf("no data source could be attached for environment %q", envTag),
+			lastErr,
+		)
+	}
+	return nil
 }
 
 func attachConnection(ctx context.Context, session duckdb.Session, conn entity.DataConnection, cfg *entity.ConnectionConfig) error {
@@ -171,7 +205,47 @@ func attachConnection(ctx context.Context, session duckdb.Session, conn entity.D
 		return session.AttachMySQL(ctx, conn.AliasName, dsn)
 	case "sqlite":
 		return session.AttachSQLite(ctx, conn.AliasName, cfg.Database)
+	case "mongodb":
+		views, err := duckdb.StreamMongoCollections(ctx, session, duckdb.MongoCollectionStream{
+			URI:      mongoURI(cfg),
+			Database: cfg.Database,
+			Alias:    conn.AliasName,
+		})
+		if err != nil {
+			return err
+		}
+		// A database with no collections mounts nothing, which would otherwise look
+		// like a successful attach and then fail on an unknown table.
+		if len(views) == 0 {
+			return fmt.Errorf("mongodb database %q has no collections to mount", cfg.Database)
+		}
+		return nil
 	default:
 		return fmt.Errorf("no duckdb attach strategy for driver %q", conn.DriverType)
 	}
+}
+
+// mongoURI prefers the stored connection string and falls back to the host fields.
+// The root MongoDB user lives in `admin`, so authentication is pointed there unless
+// the URI already says otherwise.
+func mongoURI(cfg *entity.ConnectionConfig) string {
+	if cfg.URI != "" {
+		return cfg.URI
+	}
+	if cfg.Host == "" || cfg.Port == 0 {
+		return ""
+	}
+
+	uri := url.URL{
+		Scheme: "mongodb",
+		Host:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		RawQuery: url.Values{
+			"authSource":       []string{"admin"},
+			"directConnection": []string{"true"},
+		}.Encode(),
+	}
+	if cfg.User != "" {
+		uri.User = url.UserPassword(cfg.User, cfg.Password)
+	}
+	return uri.String()
 }

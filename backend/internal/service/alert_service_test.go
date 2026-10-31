@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"muara.bi/core/internal/domain/entity"
@@ -61,7 +62,7 @@ func (m *mockWidgetRepo) ListWidgetsByDashboard(ctx context.Context, dashID stri
 func (m *mockWidgetRepo) UpdateWidget(ctx context.Context, wsID string, w *entity.Widget) error {
 	return nil
 }
-func (m *mockWidgetRepo) DeleteWidget(ctx context.Context, wsID, id string) error  { return nil }
+func (m *mockWidgetRepo) DeleteWidget(ctx context.Context, wsID, id string) error { return nil }
 func (m *mockWidgetRepo) GetProjectIDByWidget(ctx context.Context, wsID, widgetID string) (string, error) {
 	return "", nil
 }
@@ -132,11 +133,12 @@ func TestAlertService_CreateValidDigest(t *testing.T) {
 	}
 
 	req := request.CreateAlertRequest{
-		Title:          "Daily 8am Digest",
-		AlertType:      entity.AlertTypeScheduledDigest,
-		CronExpression: "0 8 * * *",
-		Channel:        entity.ChannelTelegram,
-		EnvTag:         "production",
+		Title:           "Daily 8am Digest",
+		AlertType:       entity.AlertTypeScheduledDigest,
+		CronExpression:  "0 8 * * *",
+		Channel:         entity.ChannelTelegram,
+		RecipientConfig: json.RawMessage(`{"bot_token":"123456:abc","chat_id":"-100123"}`),
+		EnvTag:          "production",
 	}
 
 	res, err := svc.Create(ctx, "ws-1", "dash-1", "user-1", req)
@@ -178,6 +180,7 @@ func TestAlertService_CreateValidThreshold(t *testing.T) {
 		ConditionOperator: &op,
 		ThresholdValue:    &threshold,
 		Channel:           entity.ChannelSlack,
+		RecipientConfig:   json.RawMessage(`{"webhook_url":"https://hooks.slack.example/services/T/B/X"}`),
 		EnvTag:            "production",
 	}
 
@@ -294,5 +297,125 @@ func TestAlertService_NonExistentDashboard(t *testing.T) {
 	appErr, ok := err.(*customerror.AppError)
 	if !ok || appErr.Code != customerror.ErrNotFound {
 		t.Errorf("expected 404 ErrNotFound, got %v", err)
+	}
+}
+
+// An alert whose channel has no usable target used to save cleanly and then
+// silently never deliver. It is a bad request instead.
+func TestAlertService_RejectsAlertWithNoUsableRecipient(t *testing.T) {
+	svc, dashRepo, _, alertRepo := setupTestAlertService()
+	ctx := context.Background()
+
+	dashRepo.dashboards["dash-1"] = &entity.Dashboard{
+		ID:          "dash-1",
+		WorkspaceID: "ws-1",
+		ProjectID:   "proj-1",
+	}
+
+	cases := []struct {
+		name    string
+		channel string
+		config  string
+	}{
+		{"telegram without a chat", entity.ChannelTelegram, `{}`},
+		{"slack with a non-http hook", entity.ChannelSlack, `{"webhook_url":"slack.example/hook"}`},
+		{"email without recipients", entity.ChannelEmail, `{"email_list":[]}`},
+		{"recipient is not an object", entity.ChannelWebhook, `[1,2]`},
+		{"recipient is unparsable", entity.ChannelSlack, `{"webhook_url":`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := svc.Create(ctx, "ws-1", "dash-1", "user-1", request.CreateAlertRequest{
+				Title:           "Alert " + tc.name,
+				AlertType:       entity.AlertTypeScheduledDigest,
+				CronExpression:  "0 8 * * *",
+				Channel:         tc.channel,
+				RecipientConfig: json.RawMessage(tc.config),
+			})
+			if err == nil {
+				t.Fatal("want a bad request, got nil")
+			}
+			appErr, ok := err.(*customerror.AppError)
+			if !ok || appErr.Code != customerror.ErrBadRequest {
+				t.Errorf("expected BAD_REQUEST, got %v", err)
+			}
+		})
+	}
+
+	if len(alertRepo.alerts) != 0 {
+		t.Errorf("repo holds %d alerts, want none saved", len(alertRepo.alerts))
+	}
+}
+
+// An alert stored before recipient validation existed stays editable for
+// unrelated fields; only a new recipient or channel is re-checked.
+func TestAlertService_UpdateKeepsLegacyRecipient(t *testing.T) {
+	svc, _, _, alertRepo := setupTestAlertService()
+	ctx := context.Background()
+
+	alertRepo.alerts["alert-1"] = &entity.DashboardAlert{
+		ID:              "alert-1",
+		WorkspaceID:     "ws-1",
+		DashboardID:     "dash-1",
+		Title:           "Legacy alert",
+		AlertType:       entity.AlertTypeScheduledDigest,
+		CronExpression:  "0 8 * * *",
+		Channel:         entity.ChannelSlack,
+		RecipientConfig: json.RawMessage("{}"),
+		EnvTag:          "production",
+		IsActive:        true,
+	}
+
+	res, err := svc.Update(ctx, "ws-1", "alert-1", request.UpdateAlertRequest{
+		Title:    "Renamed only",
+		Channel:  entity.ChannelSlack,
+		IsActive: true,
+	})
+	if err != nil {
+		t.Fatalf("renaming a legacy alert: %v", err)
+	}
+	if res.Title != "Renamed only" {
+		t.Errorf("title = %q, want %q", res.Title, "Renamed only")
+	}
+
+	_, err = svc.Update(ctx, "ws-1", "alert-1", request.UpdateAlertRequest{
+		Title:           "Renamed only",
+		Channel:         entity.ChannelSlack,
+		RecipientConfig: json.RawMessage(`{"webhook_url":"https://hooks.slack.example/x"}`),
+		IsActive:        true,
+	})
+	if err != nil {
+		t.Fatalf("supplying a valid recipient: %v", err)
+	}
+}
+
+func TestAlertService_UpdateRejectsBadRecipient(t *testing.T) {
+	svc, _, _, alertRepo := setupTestAlertService()
+	ctx := context.Background()
+
+	alertRepo.alerts["alert-1"] = &entity.DashboardAlert{
+		ID:              "alert-1",
+		WorkspaceID:     "ws-1",
+		DashboardID:     "dash-1",
+		Title:           "Alert",
+		AlertType:       entity.AlertTypeScheduledDigest,
+		CronExpression:  "0 8 * * *",
+		Channel:         entity.ChannelTelegram,
+		RecipientConfig: json.RawMessage(`{"bot_token":"123:abc","chat_id":"-1"}`),
+		EnvTag:          "production",
+		IsActive:        true,
+	}
+
+	_, err := svc.Update(ctx, "ws-1", "alert-1", request.UpdateAlertRequest{
+		RecipientConfig: json.RawMessage(`{"chat_id":"-1"}`),
+		IsActive:        true,
+	})
+	if err == nil {
+		t.Fatal("want a bad request for a telegram alert without a bot token, got nil")
+	}
+	appErr, ok := err.(*customerror.AppError)
+	if !ok || appErr.Code != customerror.ErrBadRequest {
+		t.Errorf("expected BAD_REQUEST, got %v", err)
 	}
 }

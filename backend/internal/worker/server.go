@@ -10,6 +10,7 @@ import (
 	"muara.bi/core/internal/config"
 	"muara.bi/core/internal/repository/pgsql"
 	"muara.bi/core/internal/service"
+	"muara.bi/core/internal/tasks"
 	"muara.bi/core/pkg/logging"
 )
 
@@ -40,12 +41,8 @@ func NewWorkerServer(
 	srv := asynq.NewServer(
 		redisOpt,
 		asynq.Config{
-			Concurrency: 10,
-			Queues: map[string]int{
-				QueueCritical: 6,
-				QueueDefault:  3,
-				QueueHeavy:    1,
-			},
+			Concurrency: cfg.WorkerConcurrency,
+			Queues:      tasks.QueueWeights,
 			ErrorHandler: asynq.ErrorHandlerFunc(func(ctx context.Context, task *asynq.Task, err error) {
 				logger.Error(fmt.Sprintf("asynq task failed: type=%s payload=%s err=%v", task.Type(), string(task.Payload()), err))
 			}),

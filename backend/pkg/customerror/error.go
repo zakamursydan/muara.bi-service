@@ -13,6 +13,7 @@ const (
 	ErrUnauthorized        ErrorCode = "UNAUTHORIZED"
 	ErrForbidden           ErrorCode = "FORBIDDEN"
 	ErrConflict            ErrorCode = "CONFLICT"
+	ErrTooManyRequests     ErrorCode = "TOO_MANY_REQUESTS"
 	ErrInternalServerError ErrorCode = "INTERNAL_SERVER_ERROR"
 )
 
@@ -57,6 +58,10 @@ func NewForbiddenError(message string) *AppError {
 
 func NewConflictError(message string, err error) *AppError {
 	return New(ErrConflict, message, http.StatusConflict, err)
+}
+
+func NewTooManyRequestsError(message string, err error) *AppError {
+	return New(ErrTooManyRequests, message, http.StatusTooManyRequests, err)
 }
 
 func NewInternalError(message string, err error) *AppError {

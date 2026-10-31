@@ -1,0 +1,21 @@
+node_modules
+.next
+out
+dist
+.turbo
+
+# Local credentials and machine state must never reach an image layer.
+.env
+.env.*
+*.local
+tsconfig.tsbuildinfo
+
+.git
+.github
+.idea
+.vscode
+.DS_Store
+*.log
+Dockerfile
+.dockerignore
+README.md

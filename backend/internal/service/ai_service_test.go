@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"io"
 	"testing"
 
 	"muara.bi/core/internal/config"
@@ -32,22 +33,22 @@ func (m *mockAIRepo) UpsertAISettings(ctx context.Context, settings *entity.AISe
 }
 
 type mockConnRepoForAI struct {
-	connections []entity.Connection
+	connections []entity.DataConnection
 }
 
-func (m *mockConnRepoForAI) CreateConnection(ctx context.Context, c *entity.Connection) error {
+func (m *mockConnRepoForAI) CreateConnection(ctx context.Context, c *entity.DataConnection) error {
 	return nil
 }
-func (m *mockConnRepoForAI) GetConnectionByID(ctx context.Context, wsID, id string) (*entity.Connection, error) {
+func (m *mockConnRepoForAI) GetConnectionByID(ctx context.Context, wsID, id string) (*entity.DataConnection, error) {
 	return nil, nil
 }
-func (m *mockConnRepoForAI) ListConnections(ctx context.Context, wsID string) ([]entity.Connection, error) {
+func (m *mockConnRepoForAI) GetConnectionByAlias(ctx context.Context, workspaceID, alias string) (*entity.DataConnection, error) {
+	return nil, nil
+}
+func (m *mockConnRepoForAI) ListConnections(ctx context.Context, wsID string) ([]entity.DataConnection, error) {
 	return m.connections, nil
 }
-func (m *mockConnRepoForAI) UpdateConnection(ctx context.Context, c *entity.Connection) error {
-	return nil
-}
-func (m *mockConnRepoForAI) DeleteConnection(ctx context.Context, wsID, id string) error {
+func (m *mockConnRepoForAI) UpdateCachedSchema(ctx context.Context, connectionID, envTag string, schemaJSON []byte) error {
 	return nil
 }
 func (m *mockConnRepoForAI) UpsertEnvironment(ctx context.Context, env *entity.ConnectionEnvironment) error {
@@ -59,7 +60,7 @@ func (m *mockConnRepoForAI) GetEnvironment(ctx context.Context, connID, envTag s
 func (m *mockConnRepoForAI) ListEnvironments(ctx context.Context, connID string) ([]entity.ConnectionEnvironment, error) {
 	return nil, nil
 }
-func (m *mockConnRepoForAI) UpdateCachedSchema(ctx context.Context, envID string, schemaJSON []byte) error {
+func (m *mockConnRepoForAI) DeleteConnection(ctx context.Context, wsID, id string) error {
 	return nil
 }
 
@@ -91,12 +92,8 @@ func setupAIServiceTest(t *testing.T) (*AIService, *mockAIRepo) {
 	aiRepo := &mockAIRepo{settings: make(map[string]*entity.AISettings)}
 	connRepo := &mockConnRepoForAI{}
 	semanticRepo := &mockSemanticRepoForAI{}
-	cfg := &config.Config{
-		AIDefaultProvider: "anthropic",
-		AIDefaultModel:    "claude-3-5-sonnet",
-		AIFastModel:       "gemini-1.5-flash",
-	}
-	logger := logging.NewLogger("test", "error")
+	cfg := &config.Config{}
+	logger := logging.NewLogger(io.Discard, "error")
 
 	svc := NewAIService(aiRepo, connRepo, semanticRepo, crypto, cfg, logger)
 	return svc, aiRepo
@@ -182,8 +179,8 @@ func TestAIService_GenerateSQL_RejectsEmptyPrompt(t *testing.T) {
 	}
 
 	appErr, ok := err.(*customerror.AppError)
-	if !ok || appErr.Code != 400 {
-		t.Errorf("expected 400 BadRequest error, got %v", err)
+	if !ok || appErr.Code != customerror.ErrBadRequest {
+		t.Errorf("expected BAD_REQUEST error, got %v", err)
 	}
 }
 

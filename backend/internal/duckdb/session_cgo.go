@@ -8,22 +8,37 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	_ "github.com/marcboeker/go-duckdb"
+	goduckdb "github.com/marcboeker/go-duckdb"
 )
 
+// quoteIdent wraps an object name in double quotes so DuckDB reads it as one
+// identifier instead of re-parsing characters like "-".
+func quoteIdent(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// quoteLiteral turns driver text into a DuckDB string literal. Credentials are
+// user supplied, so an embedded quote must not be able to close the ATTACH text.
+func quoteLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
 type cgoEngine struct {
-	maxMemory        string
-	threads          int
-	statementTimeout time.Duration
+	maxMemory          string
+	threads            int
+	statementTimeout   time.Duration
+	extensionDirectory string
 }
 
 func NewEngine(cfg GuardrailConfig) (Engine, error) {
 	return &cgoEngine{
-		maxMemory:        "2GB",
-		threads:          2,
-		statementTimeout: cfg.StatementTimeout,
+		maxMemory:          "2GB",
+		threads:            2,
+		statementTimeout:   cfg.StatementTimeout,
+		extensionDirectory: cfg.ExtensionDirectory,
 	}, nil
 }
 
@@ -32,8 +47,9 @@ func (e *cgoEngine) Close() error {
 }
 
 type cgoSession struct {
-	db        *sql.DB
-	tempFiles []string
+	db               *sql.DB
+	tempFiles        []string
+	statementTimeout time.Duration
 }
 
 func (e *cgoEngine) NewSession(ctx context.Context) (Session, error) {
@@ -42,13 +58,15 @@ func (e *cgoEngine) NewSession(ctx context.Context) (Session, error) {
 		return nil, fmt.Errorf("failed to initialize duckdb in-memory session: %w", err)
 	}
 
-	// Apply strict safety bounds
+	// Apply strict safety bounds. There is no DuckDB `statement_timeout` setting,
+	// so the per-query deadline is enforced with a context in Query.
 	initStatements := []string{
 		fmt.Sprintf("SET max_memory='%s'", e.maxMemory),
 		fmt.Sprintf("SET threads=%d", e.threads),
 	}
-	if e.statementTimeout > 0 {
-		initStatements = append(initStatements, fmt.Sprintf("SET statement_timeout='%s'", e.statementTimeout.String()))
+	if e.extensionDirectory != "" {
+		initStatements = append(initStatements,
+			"SET extension_directory="+quoteLiteral(e.extensionDirectory))
 	}
 
 	for _, stmt := range initStatements {
@@ -59,13 +77,27 @@ func (e *cgoEngine) NewSession(ctx context.Context) (Session, error) {
 	}
 
 	return &cgoSession{
-		db: db,
+		db:               db,
+		statementTimeout: e.statementTimeout,
 	}, nil
 }
 
+// loadExtension makes a connector available for ATTACH. The production image
+// ships pre-bundled extensions, so INSTALL is best effort, but a failed LOAD is
+// reported: swallowing it used to surface as a confusing "Catalog Error" later.
+func (s *cgoSession) loadExtension(ctx context.Context, name string) error {
+	_, _ = s.db.ExecContext(ctx, "INSTALL "+name)
+	if _, err := s.db.ExecContext(ctx, "LOAD "+name); err != nil {
+		return fmt.Errorf("duckdb extension %q is unavailable: %w", name, err)
+	}
+	return nil
+}
+
 func (s *cgoSession) AttachPostgres(ctx context.Context, alias string, dsn string) error {
-	_, _ = s.db.ExecContext(ctx, "INSTALL postgres; LOAD postgres;")
-	query := fmt.Sprintf("ATTACH '%s' AS %s (TYPE POSTGRES, READ_ONLY);", dsn, alias)
+	if err := s.loadExtension(ctx, "postgres"); err != nil {
+		return err
+	}
+	query := fmt.Sprintf("ATTACH %s AS %s (TYPE POSTGRES, READ_ONLY);", quoteLiteral(dsn), quoteIdent(alias))
 	if _, err := s.db.ExecContext(ctx, query); err != nil {
 		return fmt.Errorf("failed to attach postgres db %s: %w", alias, err)
 	}
@@ -73,8 +105,10 @@ func (s *cgoSession) AttachPostgres(ctx context.Context, alias string, dsn strin
 }
 
 func (s *cgoSession) AttachMySQL(ctx context.Context, alias string, dsn string) error {
-	_, _ = s.db.ExecContext(ctx, "INSTALL mysql; LOAD mysql;")
-	query := fmt.Sprintf("ATTACH '%s' AS %s (TYPE MYSQL, READ_ONLY);", dsn, alias)
+	if err := s.loadExtension(ctx, "mysql"); err != nil {
+		return err
+	}
+	query := fmt.Sprintf("ATTACH %s AS %s (TYPE MYSQL, READ_ONLY);", quoteLiteral(dsn), quoteIdent(alias))
 	if _, err := s.db.ExecContext(ctx, query); err != nil {
 		return fmt.Errorf("failed to attach mysql db %s: %w", alias, err)
 	}
@@ -82,8 +116,10 @@ func (s *cgoSession) AttachMySQL(ctx context.Context, alias string, dsn string) 
 }
 
 func (s *cgoSession) AttachSQLite(ctx context.Context, alias string, path string) error {
-	_, _ = s.db.ExecContext(ctx, "INSTALL sqlite; LOAD sqlite;")
-	query := fmt.Sprintf("ATTACH '%s' AS %s (TYPE SQLITE, READ_ONLY);", path, alias)
+	if err := s.loadExtension(ctx, "sqlite"); err != nil {
+		return err
+	}
+	query := fmt.Sprintf("ATTACH %s AS %s (TYPE SQLITE, READ_ONLY);", quoteLiteral(path), quoteIdent(alias))
 	if _, err := s.db.ExecContext(ctx, query); err != nil {
 		return fmt.Errorf("failed to attach sqlite db %s: %w", alias, err)
 	}
@@ -91,7 +127,7 @@ func (s *cgoSession) AttachSQLite(ctx context.Context, alias string, path string
 }
 
 func (s *cgoSession) RegisterTempView(ctx context.Context, viewName string, query string) error {
-	stmt := fmt.Sprintf("CREATE OR REPLACE TEMP VIEW %s AS (%s)", viewName, query)
+	stmt := fmt.Sprintf("CREATE OR REPLACE TEMP VIEW %s AS (%s)", quoteIdent(viewName), query)
 	if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 		return fmt.Errorf("failed to register temp view %s: %w", viewName, err)
 	}
@@ -113,7 +149,7 @@ func (s *cgoSession) RegisterJSONData(ctx context.Context, viewName string, json
 
 	// Normalize path for DuckDB
 	normalizedPath := filepath.ToSlash(tmpFile.Name())
-	stmt := fmt.Sprintf("CREATE OR REPLACE TEMP VIEW %s AS SELECT * FROM read_json_auto('%s')", viewName, normalizedPath)
+	stmt := fmt.Sprintf("CREATE OR REPLACE TEMP VIEW %s AS SELECT * FROM read_json_auto(%s)", quoteIdent(viewName), quoteLiteral(normalizedPath))
 	if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 		return fmt.Errorf("failed to register json temp view %s: %w", viewName, err)
 	}
@@ -121,9 +157,18 @@ func (s *cgoSession) RegisterJSONData(ctx context.Context, viewName string, json
 }
 
 func (s *cgoSession) Query(ctx context.Context, sqlQuery string, args ...any) (*QueryResult, error) {
+	if s.statementTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.statementTimeout)
+		defer cancel()
+	}
+
 	start := time.Now()
 	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("query exceeded the %s statement timeout: %w", s.statementTimeout, err)
+		}
 		return nil, fmt.Errorf("query execution failed: %w", err)
 	}
 	defer rows.Close()
@@ -141,7 +186,8 @@ func (s *cgoSession) Query(ctx context.Context, sqlQuery string, args ...any) (*
 		}
 	}
 
-	var resultRows []map[string]any
+	// Initialised as a slice so an empty result set serialises as [] rather than null.
+	resultRows := make([]map[string]any, 0)
 	colNames, err := rows.Columns()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read column names: %w", err)
@@ -160,12 +206,7 @@ func (s *cgoSession) Query(ctx context.Context, sqlQuery string, args ...any) (*
 
 		rowMap := make(map[string]any, len(colNames))
 		for i, colName := range colNames {
-			val := values[i]
-			if b, ok := val.([]byte); ok {
-				rowMap[colName] = string(b)
-			} else {
-				rowMap[colName] = val
-			}
+			rowMap[colName] = jsonValue(values[i])
 		}
 		resultRows = append(resultRows, rowMap)
 	}
@@ -182,6 +223,25 @@ func (s *cgoSession) Query(ctx context.Context, sqlQuery string, args ...any) (*
 		RowCount:   int64(len(resultRows)),
 		DurationMs: duration,
 	}, nil
+}
+
+// jsonValue flattens driver-only types into values the API envelope can encode.
+// DECIMAL arrives as a Go struct without JSON tags, which would otherwise reach
+// the browser as an object instead of a number.
+func jsonValue(v any) any {
+	switch t := v.(type) {
+	case nil:
+		return nil
+	case []byte:
+		return string(t)
+	case goduckdb.Decimal:
+		if t.Value == nil {
+			return nil
+		}
+		return t.Float64()
+	default:
+		return v
+	}
 }
 
 func (s *cgoSession) Close() error {

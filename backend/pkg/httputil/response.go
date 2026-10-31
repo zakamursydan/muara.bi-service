@@ -89,6 +89,15 @@ func WriteConflictResponse(w http.ResponseWriter, r *http.Request, message strin
 	})
 }
 
+func WriteTooManyRequestsResponse(w http.ResponseWriter, r *http.Request, message string, err any) {
+	writeJSON(w, http.StatusTooManyRequests, BaseResponse{
+		ReqID:   getReqID(r),
+		Status:  "too_many_requests",
+		Message: message,
+		Error:   err,
+	})
+}
+
 func WriteInternalServerErrorResponse(w http.ResponseWriter, r *http.Request, message string, err any) {
 	writeJSON(w, http.StatusInternalServerError, BaseResponse{
 		ReqID:   getReqID(r),

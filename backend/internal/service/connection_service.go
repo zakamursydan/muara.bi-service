@@ -3,17 +3,23 @@ package service
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
+	"strings"
 	"time"
 
 	"muara.bi/core/internal/domain/entity"
 	"muara.bi/core/internal/dto/request"
 	"muara.bi/core/internal/dto/response"
+	"muara.bi/core/internal/duckdb"
 	"muara.bi/core/internal/helper/cryptohelper"
+	"muara.bi/core/internal/helper/sqlident"
 	"muara.bi/core/internal/repository/pgsql"
 	"muara.bi/core/internal/ssh"
+	"muara.bi/core/pkg/customerror"
 	"muara.bi/core/pkg/logging"
 )
 
@@ -49,7 +55,15 @@ func NewConnectionService(
 
 func (s *ConnectionService) CreateConnection(ctx context.Context, wsID string, req request.CreateConnectionRequest) (*response.ConnectionResponse, error) {
 	if req.AliasName == "" {
-		return nil, errors.New("alias_name is required")
+		return nil, customerror.NewBadRequestError("alias_name is required", nil)
+	}
+	// The alias becomes the DuckDB catalog name, so it has to survive both the
+	// ATTACH statement and an unquoted `alias.table` reference in user SQL.
+	if !sqlident.IsPlain(req.AliasName) {
+		return nil, customerror.NewBadRequestError(
+			fmt.Sprintf("alias_name %q must be a plain SQL identifier: letters, digits and underscores, starting with a letter or underscore", req.AliasName),
+			nil,
+		)
 	}
 	if req.DriverType == "" {
 		req.DriverType = "postgres"
@@ -85,14 +99,15 @@ func (s *ConnectionService) ListConnections(ctx context.Context, wsID string) ([
 		return nil, err
 	}
 
-	var results []response.ConnectionResponse
+	results := make([]response.ConnectionResponse, 0)
 	for _, c := range conns {
 		envs, err := s.connRepo.ListEnvironments(ctx, c.ID)
 		if err != nil {
 			return nil, err
 		}
 
-		var envResponses []response.EnvironmentInfoResponse
+		// Initialised as a slice so an unconfigured connection serialises as [] rather than null.
+		envResponses := make([]response.EnvironmentInfoResponse, 0)
 		for _, e := range envs {
 			// Decrypt config safely to surface non-sensitive host/port info
 			var cfg entity.ConnectionConfig
@@ -199,12 +214,39 @@ func (s *ConnectionService) UpsertEnvironment(ctx context.Context, wsID, connID 
 }
 
 func (s *ConnectionService) TestConnection(ctx context.Context, wsID, connID, envTag string) (*response.TestConnectionResponse, error) {
-	cfg, _, err := s.GetDecryptedConfig(ctx, wsID, connID, envTag)
+	cfg, conn, err := s.GetDecryptedConfig(ctx, wsID, connID, envTag)
 	if err != nil {
 		return &response.TestConnectionResponse{Success: false, Message: err.Error()}, nil
 	}
 
 	start := time.Now()
+
+	// A MongoDB source keeps its target in a connection string, or in the host
+	// fields when the form filled those instead. Either way the generic
+	// host:port dial below would dial ":0", and a TCP connect would also pass
+	// for a server that then rejects the credentials — so ping with the driver.
+	if conn.DriverType == "mongodb" {
+		uri := mongoURI(cfg)
+		if uri == "" {
+			return &response.TestConnectionResponse{
+				Success:   false,
+				Message:   "mongodb needs either a connection string or a host and port",
+				LatencyMs: time.Since(start).Milliseconds(),
+			}, nil
+		}
+		if err := duckdb.PingMongo(ctx, uri, 5); err != nil {
+			return &response.TestConnectionResponse{
+				Success:   false,
+				Message:   redactCredentials(err.Error(), cfg),
+				LatencyMs: time.Since(start).Milliseconds(),
+			}, nil
+		}
+		return &response.TestConnectionResponse{
+			Success:   true,
+			Message:   "MongoDB ping succeeded",
+			LatencyMs: time.Since(start).Milliseconds(),
+		}, nil
+	}
 
 	// Check if SSH tunnel is requested
 	if cfg.SSHTunnel != nil && cfg.SSHTunnel.Enabled {
@@ -246,6 +288,25 @@ func (s *ConnectionService) TestConnection(ctx context.Context, wsID, connID, en
 		Message:   "Connection successful",
 		LatencyMs: time.Since(start).Milliseconds(),
 	}, nil
+}
+
+// redactCredentials removes the secret half of a connection string from the
+// provider text that a connection test returns to the UI. Drivers wrap the URI
+// they failed on into the error.
+func redactCredentials(msg string, cfg *entity.ConnectionConfig) string {
+	if cfg.Password != "" {
+		msg = strings.ReplaceAll(msg, cfg.Password, "<redacted>")
+	}
+	if uri := mongoURI(cfg); uri != "" {
+		parsed, err := url.Parse(uri)
+		if err == nil && parsed.User != nil {
+			msg = strings.ReplaceAll(msg, parsed.User.String(), "<credentials>")
+			if name := parsed.User.Username(); name != "" {
+				msg = strings.ReplaceAll(msg, name+"@", "<credentials>@")
+			}
+		}
+	}
+	return msg
 }
 
 func (s *ConnectionService) SyncSchema(ctx context.Context, wsID, connID, envTag string) error {
@@ -292,8 +353,15 @@ func (s *ConnectionService) SyncSchema(ctx context.Context, wsID, connID, envTag
 			}
 		}
 
-		schemaJSON, _ := s.crypto.EncryptJSON(tableMap) // reuse json helper
-		_ = s.connRepo.UpdateCachedSchema(ctx, connID, envTag, schemaJSON)
+		// cached_schema is a JSONB column and the API serves it verbatim to the
+		// builder and autocomplete, so it is stored as plain metadata, never encrypted.
+		schemaJSON, err := json.Marshal(tableMap)
+		if err != nil {
+			return fmt.Errorf("failed to encode discovered schema: %w", err)
+		}
+		if err := s.connRepo.UpdateCachedSchema(ctx, connID, envTag, schemaJSON); err != nil {
+			return fmt.Errorf("failed to persist cached schema: %w", err)
+		}
 	}
 
 	return nil

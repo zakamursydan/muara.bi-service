@@ -1,0 +1,36 @@
+# Context for the root Dockerfile (backend image). The frontend has its own
+# image and never needs to reach this build.
+frontend
+backend/node_modules
+
+.git
+.github
+.idea
+.vscode
+.DS_Store
+*.log
+
+# Never ship credentials or local config into an image layer.
+.env
+.env.*
+backend/.env
+backend/.env.local
+*.local
+
+# Local dev output; the image compiles from source.
+backend/main
+backend/bin
+backend/*.exe
+.next
+out
+dist
+build
+.turbo
+vendor
+
+docker-compose.yml
+docker-compose.*.yml
+Makefile
+PRD.md
+PLAN.md
+PROGRESS.md

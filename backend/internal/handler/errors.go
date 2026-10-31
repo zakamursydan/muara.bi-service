@@ -35,6 +35,8 @@ func WriteServiceError(w http.ResponseWriter, r *http.Request, err error) {
 		httputil.WriteNotFoundResponse(w, r, appErr.Message)
 	case customerror.ErrConflict:
 		httputil.WriteConflictResponse(w, r, appErr.Message, detail)
+	case customerror.ErrTooManyRequests:
+		httputil.WriteTooManyRequestsResponse(w, r, appErr.Message, detail)
 	default:
 		httputil.WriteInternalServerErrorResponse(w, r, appErr.Message, detail)
 	}

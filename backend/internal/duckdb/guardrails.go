@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,8 +33,10 @@ var forbiddenPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bCOPY\s+.*\s+TO\b`), // prevent arbitrary file writes via DuckDB COPY TO
 }
 
-// Regex to detect if LIMIT clause is already present in outermost query
-var limitPattern = regexp.MustCompile(`(?i)\bLIMIT\s+\d+`)
+// trailingLimit matches a LIMIT clause at the very end of the statement. Only
+// that clause bounds the rows the caller receives, so it is the one ApplyLimit
+// has to police.
+var trailingLimit = regexp.MustCompile(`(?i)\bLIMIT\s+(\d+)(\s+OFFSET\s+\d+)?\s*$`)
 
 // Regex to find template parameters like {{param_name}} or {{ param_name }}
 var templateParamPattern = regexp.MustCompile(`\{\{\s*([a-zA-Z0-9_]+)\s*\}\}`)
@@ -42,6 +45,9 @@ var templateParamPattern = regexp.MustCompile(`\{\{\s*([a-zA-Z0-9_]+)\s*\}\}`)
 type GuardrailConfig struct {
 	MaxRows          int           `json:"max_rows"`
 	StatementTimeout time.Duration `json:"statement_timeout"`
+	// ExtensionDirectory is where DuckDB looks for already-installed extensions.
+	// Empty keeps DuckDB's default (the user home directory).
+	ExtensionDirectory string `json:"extension_directory"`
 }
 
 // DefaultGuardrailConfig returns standard enterprise guardrails
@@ -84,7 +90,11 @@ func stripSQLComments(sql string) string {
 	return strings.TrimSpace(sql)
 }
 
-// ApplyLimit ensures the query ends with a strict LIMIT if not present
+// ApplyLimit guarantees the statement returns at most maxRows rows. An author's
+// own trailing LIMIT may only narrow that cap, never raise it; ignoring one that
+// was already present would let `LIMIT 999999999` defeat the row guardrail. A
+// LIMIT inside a subquery is left alone because it does not bound the outer row
+// count, so one is still appended.
 func ApplyLimit(query string, maxRows int) string {
 	if maxRows <= 0 {
 		maxRows = 10000
@@ -94,8 +104,12 @@ func ApplyLimit(query string, maxRows int) string {
 	// Strip trailing semicolon if any
 	trimmed = strings.TrimSuffix(trimmed, ";")
 
-	if limitPattern.MatchString(trimmed) {
-		return trimmed
+	if m := trailingLimit.FindStringSubmatch(trimmed); m != nil {
+		if authorLimit, err := strconv.Atoi(m[1]); err == nil && authorLimit <= maxRows {
+			return trimmed
+		}
+		prefix := trimmed[:len(trimmed)-len(m[0])]
+		return fmt.Sprintf("%sLIMIT %d%s", prefix, maxRows, m[2])
 	}
 
 	return fmt.Sprintf("%s LIMIT %d", trimmed, maxRows)

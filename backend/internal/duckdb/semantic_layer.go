@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"muara.bi/core/internal/helper/sqlident"
 )
 
 // SemanticModel represents a reusable virtual view/saved dataset
@@ -22,6 +24,12 @@ func MountSemanticModels(ctx context.Context, session Session, models []Semantic
 		cleanName := strings.TrimSpace(model.Name)
 		if cleanName == "" {
 			continue
+		}
+
+		// RegisterTempView interpolates the name into DDL, so only a plain
+		// identifier may reach it.
+		if !sqlident.IsPlain(cleanName) {
+			return fmt.Errorf("invalid semantic model name %q: use letters, digits and underscores", cleanName)
 		}
 
 		// Ensure the model SQL is safe

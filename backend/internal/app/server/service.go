@@ -9,10 +9,16 @@ import (
 	"muara.bi/core/internal/config"
 	"muara.bi/core/internal/duckdb"
 	"muara.bi/core/internal/helper/cryptohelper"
+	"muara.bi/core/internal/limiter"
 	"muara.bi/core/internal/service"
 	"muara.bi/core/internal/ssh"
 	"muara.bi/core/pkg/logging"
 )
+
+// AnalyticalSlotKey is the Redis member set every process contends for. It is
+// deliberately a single global budget: DuckDB sessions are bounded by host
+// memory, not by workspace.
+const AnalyticalSlotKey = "muara:duckdb:slots"
 
 type Service struct {
 	AuthService       service.AuthServiceProvider
@@ -48,7 +54,10 @@ func NewService(
 
 	sshPool := ssh.NewTunnelPool()
 
-	duckdbEngine, err := duckdb.NewEngine(duckdb.DefaultGuardrailConfig())
+	guardrails := duckdb.DefaultGuardrailConfig()
+	guardrails.ExtensionDirectory = cfg.DuckDB.ExtensionDirectory
+
+	duckdbEngine, err := duckdb.NewEngine(guardrails)
 	if err != nil {
 		logger.Fatal("failed to initialize duckdb engine: " + err.Error())
 	}
@@ -62,7 +71,17 @@ func NewService(
 	})
 
 	connSvc := service.NewConnectionService(repository.ConnectionRepo, cryptoHelper, sshPool, logger)
-	preparer := service.NewSessionPreparer(duckdbEngine, repository.ConnectionRepo, repository.SemanticRepo, connSvc, logger)
+	// One Redis-backed budget spans the API and every worker replica, because a
+	// DuckDB session is the resource that actually runs out of memory.
+	analyticalSlots := limiter.NewSemaphore(
+		internalConnection.Redis,
+		AnalyticalSlotKey,
+		cfg.DuckDB.MaxConcurrentExecutions,
+		time.Duration(cfg.DuckDB.SlotLeaseSeconds)*time.Second,
+		time.Duration(cfg.DuckDB.QueueTimeoutSeconds)*time.Second,
+		logger,
+	)
+	preparer := service.NewSessionPreparer(duckdbEngine, repository.ConnectionRepo, repository.SemanticRepo, connSvc, analyticalSlots, logger)
 	accessSvc := service.NewAccessService(
 		repository.UserRepo,
 		repository.ProjectRepo,

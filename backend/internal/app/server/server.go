@@ -73,6 +73,7 @@ func (s *Server) BeforeStart(ctx context.Context) error {
 	s.router.Route("/api/v1/workspaces/{wsId}", func(ws chi.Router) {
 		ws.Use(middlewarePkg.JWTMiddleware(s.cfg.AppSecretKey))
 
+		handler.NewAccessHandler(svc.AccessService).RegisterRoutes(ws)
 		handler.NewConnectionHandler(svc.ConnectionService, guard).RegisterRoutes(ws)
 		handler.NewQueryHandler(svc.QueryService, guard).RegisterRoutes(ws)
 		handler.NewSemanticHandler(svc.SemanticService, guard).RegisterRoutes(ws)

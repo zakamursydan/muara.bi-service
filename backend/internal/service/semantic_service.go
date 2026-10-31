@@ -9,6 +9,7 @@ import (
 	"muara.bi/core/internal/dto/request"
 	"muara.bi/core/internal/dto/response"
 	"muara.bi/core/internal/duckdb"
+	"muara.bi/core/internal/helper/sqlident"
 	"muara.bi/core/internal/repository/pgsql"
 )
 
@@ -31,6 +32,10 @@ func NewSemanticService(repo pgsql.SemanticRepositoryProvider) *SemanticService 
 func (s *SemanticService) Create(ctx context.Context, wsID, projID, userID string, req request.CreateSemanticModelRequest) (*response.SemanticModelResponse, error) {
 	if req.Name == "" {
 		return nil, errors.New("model name is required")
+	}
+	// The name becomes a DuckDB temp view identifier.
+	if !sqlident.IsPlain(req.Name) {
+		return nil, errors.New("model name must be a plain identifier: letters, digits and underscores")
 	}
 
 	// Validate SQL query through guardrails
@@ -69,7 +74,7 @@ func (s *SemanticService) List(ctx context.Context, wsID, projID string) ([]resp
 		return nil, err
 	}
 
-	var results []response.SemanticModelResponse
+	results := make([]response.SemanticModelResponse, 0)
 	for _, m := range models {
 		results = append(results, response.SemanticModelResponse{
 			ID:           m.ID,
@@ -110,6 +115,9 @@ func (s *SemanticService) Get(ctx context.Context, wsID, id string) (*response.S
 }
 
 func (s *SemanticService) Update(ctx context.Context, wsID, id string, req request.UpdateSemanticModelRequest) error {
+	if !sqlident.IsPlain(req.Name) {
+		return errors.New("model name must be a plain identifier: letters, digits and underscores")
+	}
 	if err := duckdb.ValidateQuery(req.RawSQL); err != nil {
 		return fmt.Errorf("invalid semantic model sql: %w", err)
 	}

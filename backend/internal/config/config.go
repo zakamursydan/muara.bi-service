@@ -14,9 +14,33 @@ type Config struct {
 	AppSecretKey           string `env:"APP_SECRET_KEY" default:"muara-bi-super-secure-jwt-signing-secret-key-32b"`
 	AppEncryptionMasterKey string `env:"APP_ENCRYPTION_MASTER_KEY" default:"0123456789abcdef0123456789abcdef"` // 32 bytes for AES-256-GCM
 	AppPublicBaseURL       string `env:"APP_PUBLIC_BASE_URL" default:"http://localhost:3000"`                  // web origin used to build share links
-	Database               DatabaseConfig
-	Redis                  RedisConfig
-	Otel                   telemetry.OtelConfig
+	// WorkerConcurrency is how many Asynq tasks one worker process runs at once.
+	// Tasks that reach DuckDB additionally queue on the shared analytical budget,
+	// so this may safely exceed DUCKDB_MAX_CONCURRENCY.
+	WorkerConcurrency int `env:"WORKER_CONCURRENCY" default:"4"`
+	Database          DatabaseConfig
+	Redis             RedisConfig
+	DuckDB            DuckDBConfig
+	Otel              telemetry.OtelConfig
+}
+
+// DuckDBConfig tunes the analytical engine. The extension directory points at
+// pre-bundled .duckdb_extension files so a container with no network egress can
+// still ATTACH external databases.
+type DuckDBConfig struct {
+	ExtensionDirectory string `env:"DUCKDB_EXTENSION_DIRECTORY" default:""`
+
+	// MaxConcurrentExecutions is how many DuckDB sessions may run at once across
+	// every API and worker process sharing this Redis. Each session is capped at
+	// 2GB by the engine, so the default assumes a host that can hold two of them.
+	MaxConcurrentExecutions int `env:"DUCKDB_MAX_CONCURRENCY" default:"2"`
+	// SlotLeaseSeconds is how long an abandoned slot is tolerated before it is
+	// reclaimed. It must exceed the longest guarded execution, otherwise a slow but
+	// live query loses its budget to a newcomer.
+	SlotLeaseSeconds int `env:"DUCKDB_SLOT_LEASE_SECONDS" default:"120"`
+	// QueueTimeoutSeconds is how long a caller waits for a free slot before it
+	// gets a 429.
+	QueueTimeoutSeconds int `env:"DUCKDB_QUEUE_TIMEOUT_SECONDS" default:"30"`
 }
 
 type DatabaseConfig struct {

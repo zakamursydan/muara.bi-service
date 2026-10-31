@@ -22,6 +22,15 @@ const (
 	TypeDigestDispatch = "digest:dispatch"
 )
 
+// QueueWeights is the Asynq weighting every worker runs with. It lives next to
+// the queue names so a priority can never be declared in one place and weighted
+// differently in another.
+var QueueWeights = map[string]int{
+	QueueCritical: 6,
+	QueueDefault:  3,
+	QueueHeavy:    1,
+}
+
 // QueryExecutePayload holds parameters for async heavy query execution.
 type QueryExecutePayload struct {
 	WorkspaceID    string         `json:"workspace_id"`
@@ -84,13 +93,20 @@ type DigestDispatchPayload struct {
 	EnvTag        string `json:"env_tag"`
 }
 
-// NewQueryExecuteTask creates a new Asynq Task for query execution
+// NewQueryExecuteTask creates a new Asynq Task for query execution.
+//
+// The timeout bounds the job to the analytical budget: waiting for a slot plus
+// the engine's statement timeout. Asynq's own default is 30 minutes, which would
+// let one stuck query hold a worker slot far past the point anyone would wait.
 func NewQueryExecuteTask(payload QueryExecutePayload) (*asynq.Task, error) {
 	bytes, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
-	return asynq.NewTask(TypeQueryExecute, bytes, asynq.Queue(QueueDefault), asynq.MaxRetry(3)), nil
+	return asynq.NewTask(TypeQueryExecute, bytes,
+		asynq.Queue(QueueDefault),
+		asynq.MaxRetry(3),
+		asynq.Timeout(90*time.Second)), nil
 }
 
 // NewExportJobTask creates a new Asynq Task for export generation

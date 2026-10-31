@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
+	"muara.bi/core/internal/domain/entity"
 	"muara.bi/core/internal/duckdb"
 	"muara.bi/core/internal/exporter"
 	"muara.bi/core/internal/repository/pgsql"
@@ -25,7 +25,7 @@ type DigestWorker struct {
 	dashboardRepo pgsql.DashboardRepositoryProvider
 	widgetRepo    pgsql.WidgetRepositoryProvider
 	preparer      *service.SessionPreparer
-	httpClient    *http.Client
+	notifier      *Notifier
 	logger        *logging.Logger
 }
 
@@ -41,7 +41,7 @@ func NewDigestWorker(
 		dashboardRepo: dashboardRepo,
 		widgetRepo:    widgetRepo,
 		preparer:      preparer,
-		httpClient:    &http.Client{Timeout: 30 * time.Second},
+		notifier:      NewNotifier(&http.Client{Timeout: 30 * time.Second}, logger),
 		logger:        logger,
 	}
 }
@@ -147,59 +147,17 @@ func (w *DigestWorker) dispatch(
 	message := fmt.Sprintf("📊 [muara.bi Scheduled Digest]\nDashboard: %s\nTitle: %s\nEnvironment: %s\nTime: %s\n\n%s",
 		dashboardTitle, payload.Title, payload.EnvTag, time.Now().Format("2006-01-02 15:04:05 MST"), summaryText)
 
-	var recipient map[string]any
-	_ = json.Unmarshal([]byte(payload.RecipientJSON), &recipient)
-
-	switch payload.Channel {
-	case "SLACK":
-		webhookURL, _ := recipient["webhook_url"].(string)
-		if webhookURL != "" {
-			body, _ := json.Marshal(map[string]string{"text": message})
-			req, _ := http.NewRequestWithContext(ctx, "POST", webhookURL, bytes.NewBuffer(body))
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := w.httpClient.Do(req)
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-		}
-	case "TELEGRAM":
-		botToken, _ := recipient["bot_token"].(string)
-		chatID, _ := recipient["chat_id"].(string)
-		if botToken != "" && chatID != "" {
-			apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
-			body, _ := json.Marshal(map[string]string{"chat_id": chatID, "text": message})
-			req, _ := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBuffer(body))
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := w.httpClient.Do(req)
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-		}
-	case "WEBHOOK":
-		webhookURL, _ := recipient["webhook_url"].(string)
-		if webhookURL != "" {
-			payloadBytes, _ := json.Marshal(map[string]any{
-				"alert_id":        payload.AlertID,
-				"dashboard_id":    payload.DashboardID,
-				"dashboard_title": dashboardTitle,
-				"title":           payload.Title,
-				"env_tag":         payload.EnvTag,
-				"summaries":       summaries,
-				"generated_at":    time.Now().UTC().Format(time.RFC3339),
-			})
-			req, _ := http.NewRequestWithContext(ctx, "POST", webhookURL, bytes.NewBuffer(payloadBytes))
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := w.httpClient.Do(req)
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-		}
-	default:
-		w.logger.Info(fmt.Sprintf("Digest notification logged (no external webhook for channel=%s): %s", payload.Channel, message))
+	if payload.Channel == entity.ChannelWebhook {
+		return w.notifier.PostJSON(ctx, payload.RecipientJSON, map[string]any{
+			"alert_id":        payload.AlertID,
+			"dashboard_id":    payload.DashboardID,
+			"dashboard_title": dashboardTitle,
+			"title":           payload.Title,
+			"env_tag":         payload.EnvTag,
+			"summaries":       summaries,
+			"generated_at":    time.Now().UTC().Format(time.RFC3339),
+		})
 	}
 
-	return nil
+	return w.notifier.SendText(ctx, payload.Channel, payload.RecipientJSON, message)
 }

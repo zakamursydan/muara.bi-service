@@ -124,11 +124,20 @@ func (s *AIService) UpdateSettings(ctx context.Context, wsID string, req request
 	}
 
 	var encryptedKey []byte
-	if strings.TrimSpace(req.APIKey) != "" {
+	if key := strings.TrimSpace(req.APIKey); key != "" {
 		var err error
-		encryptedKey, err = s.crypto.Encrypt([]byte(strings.TrimSpace(req.APIKey)))
+		encryptedKey, err = s.crypto.Encrypt([]byte(key))
 		if err != nil {
 			return nil, customerror.NewInternalError("failed to encrypt api key", err)
+		}
+	} else {
+		// The upsert overwrites the column, so an omitted key must carry the stored one forward.
+		existing, err := s.aiRepo.GetAISettingsByWorkspace(ctx, wsID)
+		if err != nil {
+			return nil, customerror.NewInternalError("failed to load existing ai settings", err)
+		}
+		if existing != nil {
+			encryptedKey = existing.EncryptedAPIKey
 		}
 	}
 
@@ -279,7 +288,7 @@ CRITICAL RULES:
 	}
 
 	// Validate each widget SQL
-	var safeWidgets []response.SuggestedWidgetResponse
+	safeWidgets := make([]response.SuggestedWidgetResponse, 0)
 	for _, w := range dashResp.Widgets {
 		if err := duckdb.ValidateQuery(w.RawSQL); err == nil {
 			if w.EchartsConfig == nil {

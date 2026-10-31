@@ -1,4 +1,51 @@
-version: '3.8'
+# muara.bi self-hosted stack: metadata store, queue, sample analytical sources,
+# the Go API/worker and the Next.js web app.
+#
+#   1. cp .env.example .env   (APP_SECRET_KEY and APP_ENCRYPTION_MASTER_KEY are
+#      required — compose refuses to start with them unset)
+#   2. docker compose up -d --build
+#
+# Services resolve each other by name on compose's default network, so a data
+# source registered in the UI uses host `sample_postgres` / `sample_mongo`, not
+# 127.0.0.1 and not the published port.
+
+x-core-env: &core-env
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  APP_HTTP_PORT: "8080"
+  APP_SECRET_KEY: ${APP_SECRET_KEY:?APP_SECRET_KEY must be set in .env}
+  APP_ENCRYPTION_MASTER_KEY: ${APP_ENCRYPTION_MASTER_KEY:?APP_ENCRYPTION_MASTER_KEY must be set in .env}
+  APP_PUBLIC_BASE_URL: ${APP_PUBLIC_BASE_URL:-http://localhost:3000}
+  # Inside the network the metadata Postgres listens on its container port;
+  # DB_PUBLISH_PORT only controls how it is exposed to the host.
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_USERNAME: ${DB_USERNAME:-muara_user}
+  DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env}
+  DB_NAME: ${DB_NAME:-muara_bi_db}
+  DB_SCHEMA: ${DB_SCHEMA:-public}
+  DB_SSL_MODE: ${DB_SSL_MODE:-disable}
+  ENABLE_MIGRATIONS: ${ENABLE_MIGRATIONS:-true}
+  # DuckDB sessions are memory-bound, so one shared budget spans the API and all
+  # worker replicas. Raise DUCKDB_MAX_CONCURRENCY only with host memory to match.
+  DUCKDB_MAX_CONCURRENCY: ${DUCKDB_MAX_CONCURRENCY:-2}
+  DUCKDB_SLOT_LEASE_SECONDS: ${DUCKDB_SLOT_LEASE_SECONDS:-120}
+  DUCKDB_QUEUE_TIMEOUT_SECONDS: ${DUCKDB_QUEUE_TIMEOUT_SECONDS:-30}
+  WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+  REDIS_DB: ${REDIS_DB:-0}
+  # Fallback AI credentials only; the workspace key stored encrypted in the
+  # metadata DB takes precedence. Left empty unless the host env provides one.
+  AI_DEFAULT_PROVIDER: ${AI_DEFAULT_PROVIDER:-anthropic}
+  AI_DEFAULT_MODEL: ${AI_DEFAULT_MODEL:-claude-3-5-sonnet-20241022}
+  AI_FAST_MODEL: ${AI_FAST_MODEL:-gemini-1.5-flash}
+  AI_API_KEY: ${AI_API_KEY:-}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USERNAME: ${SMTP_USERNAME:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_FROM: ${SMTP_FROM:-}
 
 services:
   # Metadata Database for Muara.bi Platform
@@ -8,10 +55,10 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_USERNAME:-muara_user}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-muara_secret_pass}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env}
       POSTGRES_DB: ${DB_NAME:-muara_bi_db}
     ports:
-      - "${DB_PORT:-5434}:5432"
+      - "${DB_PUBLISH_PORT:-5434}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -49,6 +96,11 @@ services:
       - "5435:5432"
     volumes:
       - sample_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sample_user -d sample_ecommerce"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   # Target Sample Database 2: MongoDB (e.g. sample_events)
   sample_mongo:
@@ -63,6 +115,77 @@ services:
       - "27017:27017"
     volumes:
       - sample_mongo_data:/data/db
+
+  # Core API. Serves /health, so it is the readiness gate for the web proxy and
+  # for the worker (migrations run during API start).
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Override these in .env when a registry mirror is required — e.g.
+        # GO_IMAGE=public.ecr.aws/docker/library/golang:1.27-bookworm if
+        # Docker Hub is not reachable from the build host.
+        GO_IMAGE: ${GO_IMAGE:-golang:1.27-bookworm}
+    image: muara-bi-core:${IMAGE_TAG:-dev}
+    container_name: muara_api
+    restart: unless-stopped
+    environment: *core-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      sample_postgres:
+        condition: service_healthy
+      sample_mongo:
+        condition: service_started
+    ports:
+      - "${APP_API_PORT:-8080}:8080"
+
+  # Asynq queue pool: heavy queries, exports, sampling, alert dispatch. The
+  # image healthcheck probes the API port, which this process never opens.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        GO_IMAGE: ${GO_IMAGE:-golang:1.27-bookworm}
+    image: muara-bi-core:${IMAGE_TAG:-dev}
+    container_name: muara_worker
+    restart: unless-stopped
+    command: ["/usr/local/bin/worker"]
+    environment: *core-env
+    healthcheck:
+      disable: true
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # Next.js standalone server. It proxies /api/* to the Go service, so the
+  # browser only ever talks to this origin and the API needs no CORS.
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:24-alpine}
+        # Baked into .next/routes-manifest.json: Next resolves the /api/* rewrite
+        # at build time, so this cannot be a runtime-only variable.
+        API_BASE_URL: ${WEB_API_BASE_URL:-http://api:8080}
+    image: muara-bi-web:${IMAGE_TAG:-dev}
+    container_name: muara_web
+    restart: unless-stopped
+    environment:
+      # Runtime copy of the same target, read by src/proxy.ts for the share/embed
+      # CSP lookups. The rewrite above is fixed at build time.
+      API_BASE_URL: ${WEB_API_BASE_URL:-http://api:8080}
+      APP_PUBLIC_BASE_URL: ${APP_PUBLIC_BASE_URL:-http://localhost:3000}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${APP_WEB_PORT:-3000}:3000"
 
 volumes:
   postgres_data:
