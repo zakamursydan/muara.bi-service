@@ -25,7 +25,10 @@ ENV CGO_ENABLED=1
 WORKDIR /src
 
 # Resolve modules first so source-only edits reuse the download cache.
+# backend/engine is a separate Go module (shared with muara.bi Desktop), so its
+# go.mod must exist before the main module resolves the replace directive.
 COPY backend/go.mod backend/go.sum ./
+COPY backend/engine/go.mod backend/engine/go.sum ./engine/
 RUN go mod download
 
 COPY backend/ ./

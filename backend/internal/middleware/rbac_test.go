@@ -9,8 +9,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"muara.bi/core/internal/domain/entity"
-	"muara.bi/core/internal/duckdb"
 	"muara.bi/core/internal/service"
+	"muara.bi/engine/duckdb"
 )
 
 type stubAccess struct {

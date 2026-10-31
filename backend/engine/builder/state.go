@@ -1,4 +1,4 @@
-package entity
+package builder
 
 // WidgetBuilderState is the no-code Visual Builder payload stored on a widget
 // whose query_mode is SYNCED. The backend compiles it into raw_sql so the

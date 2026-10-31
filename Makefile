@@ -4,6 +4,7 @@
 
 COMPOSE ?= docker compose
 BACKEND := backend
+ENGINE := backend/engine
 FRONTEND := frontend
 
 .PHONY: help up down rebuild ps logs test vet lint tidy \
@@ -31,13 +32,18 @@ logs: ## follow API and worker logs
 	$(COMPOSE) logs -f api worker
 
 # --------------------------------- backend -----------------------------------
-test: ## run backend unit tests
+# backend/engine is its own module (muara.bi/engine), so ./... in $(BACKEND)
+# does not reach it; both modules are always run.
+test: ## run backend unit tests (engine + core)
+	cd $(ENGINE) && go test ./...
 	cd $(BACKEND) && go test ./...
 
-vet: ## run go vet
+vet: ## run go vet (engine + core)
+	cd $(ENGINE) && go vet ./...
 	cd $(BACKEND) && go vet ./...
 
-tidy: ## sync go.mod / go.sum
+tidy: ## sync go.mod / go.sum (engine first, it is the replaced module)
+	cd $(ENGINE) && go mod tidy
 	cd $(BACKEND) && go mod tidy
 
 api-build: ## compile the API binary into backend/bin

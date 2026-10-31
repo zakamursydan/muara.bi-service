@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"muara.bi/core/internal/helper/sqlident"
+	"muara.bi/engine/sqlident"
 )
 
 var (

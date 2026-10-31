@@ -12,10 +12,10 @@ import (
 
 	"github.com/hibiken/asynq"
 	"muara.bi/core/internal/domain/entity"
-	"muara.bi/core/internal/duckdb"
-	"muara.bi/core/internal/exporter"
 	"muara.bi/core/internal/service"
 	"muara.bi/core/pkg/logging"
+	"muara.bi/engine/duckdb"
+	"muara.bi/engine/exporter"
 )
 
 // ExportWorker renders one or more analytical queries into a downloadable file.

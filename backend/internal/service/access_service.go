@@ -4,8 +4,8 @@ import (
 	"context"
 
 	"muara.bi/core/internal/domain/entity"
-	"muara.bi/core/internal/duckdb"
 	"muara.bi/core/pkg/customerror"
+	"muara.bi/engine/duckdb"
 )
 
 // Scope identifies whose permissions to resolve and against which tenant.

@@ -14,13 +14,13 @@ import (
 	"muara.bi/core/internal/domain/entity"
 	"muara.bi/core/internal/dto/request"
 	"muara.bi/core/internal/dto/response"
-	"muara.bi/core/internal/duckdb"
-	"muara.bi/core/internal/helper/cryptohelper"
-	"muara.bi/core/internal/helper/sqlident"
 	"muara.bi/core/internal/repository/pgsql"
-	"muara.bi/core/internal/ssh"
 	"muara.bi/core/pkg/customerror"
 	"muara.bi/core/pkg/logging"
+	"muara.bi/engine/cryptohelper"
+	"muara.bi/engine/duckdb"
+	"muara.bi/engine/sqlident"
+	"muara.bi/engine/ssh"
 )
 
 type ConnectionServiceProvider interface {

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"muara.bi/core/internal/duckdb"
+	"muara.bi/engine/duckdb"
 )
 
 // QueryCache wraps Redis client for analytical query results caching

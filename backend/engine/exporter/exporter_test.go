@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/xuri/excelize/v2"
-	"muara.bi/core/internal/duckdb"
+	"muara.bi/engine/duckdb"
 )
 
 func sampleResult() *duckdb.QueryResult {

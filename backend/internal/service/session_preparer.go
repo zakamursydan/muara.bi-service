@@ -7,11 +7,11 @@ import (
 	"net/url"
 
 	"muara.bi/core/internal/domain/entity"
-	"muara.bi/core/internal/duckdb"
 	"muara.bi/core/internal/limiter"
 	"muara.bi/core/internal/repository/pgsql"
 	"muara.bi/core/pkg/customerror"
 	"muara.bi/core/pkg/logging"
+	"muara.bi/engine/duckdb"
 )
 
 const DefaultEnvTag = "default"
@@ -141,8 +141,6 @@ func (p *SessionPreparer) mountSemanticModels(ctx context.Context, session duckd
 	for _, m := range models {
 		smList = append(smList, duckdb.SemanticModel{
 			ID:          m.ID,
-			WorkspaceID: m.WorkspaceID,
-			ProjectID:   m.ProjectID,
 			Name:        m.Name,
 			Description: m.Description,
 			RawSQL:      m.RawSQL,

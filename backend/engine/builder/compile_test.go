@@ -1,21 +1,19 @@
-package service
+package builder
 
 import (
 	"strings"
 	"testing"
-
-	"muara.bi/core/internal/domain/entity"
 )
 
 func TestCompileBuilderSQL(t *testing.T) {
-	state := entity.WidgetBuilderState{
+	state := WidgetBuilderState{
 		DatasourceAlias: "sales",
 		Table:           "orders",
 		Dimensions:      []string{"branch"},
-		Metrics: []entity.BuilderMetric{
+		Metrics: []BuilderMetric{
 			{Column: "revenue", Aggregation: "SUM"},
 		},
-		Filters: []entity.BuilderFilter{
+		Filters: []BuilderFilter{
 			{Column: "branch", Operator: "=", Value: "JKT-01"},
 		},
 		Limit: 500,
@@ -42,46 +40,46 @@ func TestCompileBuilderSQL(t *testing.T) {
 func TestCompileBuilderSQLRejectsInjection(t *testing.T) {
 	tests := []struct {
 		name  string
-		state entity.WidgetBuilderState
+		state WidgetBuilderState
 	}{
 		{
 			name: "table with stacked statement",
-			state: entity.WidgetBuilderState{
+			state: WidgetBuilderState{
 				Table:      "orders; DROP TABLE users",
 				Dimensions: []string{"branch"},
 			},
 		},
 		{
 			name: "dimension with subquery",
-			state: entity.WidgetBuilderState{
+			state: WidgetBuilderState{
 				Table:      "orders",
 				Dimensions: []string{"(SELECT password FROM users)"},
 			},
 		},
 		{
 			name: "metric column with comment",
-			state: entity.WidgetBuilderState{
+			state: WidgetBuilderState{
 				Table:   "orders",
-				Metrics: []entity.BuilderMetric{{Column: "revenue -- ", Aggregation: "SUM"}},
+				Metrics: []BuilderMetric{{Column: "revenue -- ", Aggregation: "SUM"}},
 			},
 		},
 		{
 			name: "unsupported aggregation",
-			state: entity.WidgetBuilderState{
+			state: WidgetBuilderState{
 				Table:   "orders",
-				Metrics: []entity.BuilderMetric{{Column: "revenue", Aggregation: "SUM(revenue)) AS x --"}},
+				Metrics: []BuilderMetric{{Column: "revenue", Aggregation: "SUM(revenue)) AS x --"}},
 			},
 		},
 		{
 			name: "alias with quote",
-			state: entity.WidgetBuilderState{
+			state: WidgetBuilderState{
 				Table:   "orders",
-				Metrics: []entity.BuilderMetric{{Column: "revenue", Aggregation: "SUM", Alias: "total' FROM users --"}},
+				Metrics: []BuilderMetric{{Column: "revenue", Aggregation: "SUM", Alias: "total' FROM users --"}},
 			},
 		},
 		{
 			name: "datasource alias with dot traversal",
-			state: entity.WidgetBuilderState{
+			state: WidgetBuilderState{
 				DatasourceAlias: "sales.public",
 				Table:           "orders",
 				Dimensions:      []string{"branch"},
@@ -89,34 +87,34 @@ func TestCompileBuilderSQLRejectsInjection(t *testing.T) {
 		},
 		{
 			name: "filter column with injection",
-			state: entity.WidgetBuilderState{
+			state: WidgetBuilderState{
 				Table:      "orders",
 				Dimensions: []string{"branch"},
-				Filters:    []entity.BuilderFilter{{Column: "branch = 'x' OR 1=1 --", Operator: "="}},
+				Filters:    []BuilderFilter{{Column: "branch = 'x' OR 1=1 --", Operator: "="}},
 			},
 		},
 		{
 			name: "unsupported filter operator",
-			state: entity.WidgetBuilderState{
+			state: WidgetBuilderState{
 				Table:      "orders",
 				Dimensions: []string{"branch"},
-				Filters:    []entity.BuilderFilter{{Column: "branch", Operator: "IN (SELECT 1)"}},
+				Filters:    []BuilderFilter{{Column: "branch", Operator: "IN (SELECT 1)"}},
 			},
 		},
 		{
 			name:  "missing table",
-			state: entity.WidgetBuilderState{Dimensions: []string{"branch"}},
+			state: WidgetBuilderState{Dimensions: []string{"branch"}},
 		},
 		{
 			name:  "no dimensions or metrics",
-			state: entity.WidgetBuilderState{Table: "orders"},
+			state: WidgetBuilderState{Table: "orders"},
 		},
 		{
 			name: "raw metric alongside dimensions",
-			state: entity.WidgetBuilderState{
+			state: WidgetBuilderState{
 				Table:      "orders",
 				Dimensions: []string{"branch"},
-				Metrics:    []entity.BuilderMetric{{Column: "revenue", Aggregation: "NONE"}},
+				Metrics:    []BuilderMetric{{Column: "revenue", Aggregation: "NONE"}},
 			},
 		},
 	}
@@ -131,13 +129,13 @@ func TestCompileBuilderSQLRejectsInjection(t *testing.T) {
 }
 
 func TestCompileBuilderSQLQualifiedColumns(t *testing.T) {
-	state := entity.WidgetBuilderState{
+	state := WidgetBuilderState{
 		Table:      "orders",
 		Dimensions: []string{"o.branch"},
-		Metrics: []entity.BuilderMetric{
+		Metrics: []BuilderMetric{
 			{Column: "o.revenue", Aggregation: "COUNT_DISTINCT"},
 		},
-		Filters: []entity.BuilderFilter{
+		Filters: []BuilderFilter{
 			{Column: "o.status", Operator: "!=", Parameter: "status"},
 		},
 	}

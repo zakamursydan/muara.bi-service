@@ -6,9 +6,9 @@ import (
 	"strings"
 
 	"muara.bi/core/internal/domain/entity"
-	"muara.bi/core/internal/duckdb"
-	"muara.bi/core/internal/helper/sqlident"
 	"muara.bi/core/pkg/customerror"
+	"muara.bi/engine/duckdb"
+	"muara.bi/engine/sqlident"
 )
 
 // ParseRLSRuleSpecs decodes the project_members.rls_rules JSONB payload. An

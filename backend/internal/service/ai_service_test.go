@@ -8,9 +8,9 @@ import (
 	"muara.bi/core/internal/config"
 	"muara.bi/core/internal/domain/entity"
 	"muara.bi/core/internal/dto/request"
-	"muara.bi/core/internal/helper/cryptohelper"
 	"muara.bi/core/pkg/customerror"
 	"muara.bi/core/pkg/logging"
+	"muara.bi/engine/cryptohelper"
 )
 
 type mockAIRepo struct {

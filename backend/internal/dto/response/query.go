@@ -1,6 +1,6 @@
 package response
 
-import "muara.bi/core/internal/duckdb"
+import "muara.bi/engine/duckdb"
 
 // ExecuteQueryResponse defines the standardized analytical query output
 type ExecuteQueryResponse struct {

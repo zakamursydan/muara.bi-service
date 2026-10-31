@@ -10,9 +10,9 @@ import (
 	"muara.bi/core/internal/dto/request"
 	"muara.bi/core/internal/dto/response"
 	"muara.bi/core/internal/helper/dberr"
-	"muara.bi/core/internal/helper/sqlident"
 	"muara.bi/core/internal/repository/pgsql"
 	"muara.bi/core/pkg/customerror"
+	"muara.bi/engine/sqlident"
 )
 
 var projectRoles = map[string]struct{}{

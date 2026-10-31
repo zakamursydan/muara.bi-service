@@ -1,11 +1,10 @@
-package service
+package builder
 
 import (
 	"fmt"
 	"strings"
 
-	"muara.bi/core/internal/domain/entity"
-	"muara.bi/core/internal/helper/sqlident"
+	"muara.bi/engine/sqlident"
 )
 
 // builderAggregations maps a visual builder aggregation to its SQL template.
@@ -29,7 +28,7 @@ var builderFilterOperators = map[string]struct{}{
 // Identifiers are validated against a strict pattern and every filter value is
 // emitted as a {{parameter}} placeholder, so no user supplied text is ever
 // concatenated into the statement.
-func CompileBuilderSQL(state entity.WidgetBuilderState) (string, error) {
+func CompileBuilderSQL(state WidgetBuilderState) (string, error) {
 	table, err := compileTableRef(state)
 	if err != nil {
 		return "", err
@@ -108,7 +107,7 @@ func CompileBuilderSQL(state entity.WidgetBuilderState) (string, error) {
 	return sb.String(), nil
 }
 
-func compileTableRef(state entity.WidgetBuilderState) (string, error) {
+func compileTableRef(state WidgetBuilderState) (string, error) {
 	table := strings.TrimSpace(state.Table)
 	if table == "" {
 		return "", fmt.Errorf("builder state requires a source table")
@@ -127,7 +126,7 @@ func compileTableRef(state entity.WidgetBuilderState) (string, error) {
 	return alias + "." + table, nil
 }
 
-func compileFilters(filters []entity.BuilderFilter) ([]string, error) {
+func compileFilters(filters []BuilderFilter) ([]string, error) {
 	parts := make([]string, 0, len(filters))
 
 	for _, filter := range filters {

@@ -5,14 +5,13 @@ import (
 	"fmt"
 	"strings"
 
-	"muara.bi/core/internal/helper/sqlident"
+	"muara.bi/engine/sqlident"
 )
 
-// SemanticModel represents a reusable virtual view/saved dataset
+// SemanticModel represents a reusable virtual view/saved dataset. The engine is
+// tenant-blind: ownership fields live in the caller's domain entity, not here.
 type SemanticModel struct {
 	ID          string `json:"id"`
-	WorkspaceID string `json:"workspace_id"`
-	ProjectID   string `json:"project_id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	RawSQL      string `json:"raw_sql"`

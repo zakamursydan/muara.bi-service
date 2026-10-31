@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"muara.bi/core/internal/duckdb"
+	"muara.bi/engine/duckdb"
 )
 
 const (

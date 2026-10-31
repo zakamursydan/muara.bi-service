@@ -10,9 +10,10 @@ import (
 	"muara.bi/core/internal/domain/entity"
 	"muara.bi/core/internal/dto/request"
 	"muara.bi/core/internal/dto/response"
-	"muara.bi/core/internal/duckdb"
 	"muara.bi/core/internal/repository/pgsql"
 	"muara.bi/core/pkg/customerror"
+	"muara.bi/engine/builder"
+	"muara.bi/engine/duckdb"
 )
 
 const (
@@ -160,11 +161,11 @@ func resolveWidgetSQL(queryMode string, builderState json.RawMessage, rawSQL str
 		if len(builderState) == 0 {
 			return "", "", customerror.NewBadRequestError("builder_state is required for SYNCED widgets", nil)
 		}
-		var state entity.WidgetBuilderState
+		var state builder.WidgetBuilderState
 		if err := json.Unmarshal(builderState, &state); err != nil {
 			return "", "", customerror.NewBadRequestError("invalid builder_state payload", err)
 		}
-		compiled, err := CompileBuilderSQL(state)
+		compiled, err := builder.CompileBuilderSQL(state)
 		if err != nil {
 			return "", "", customerror.NewBadRequestError("failed to compile visual builder query", err)
 		}

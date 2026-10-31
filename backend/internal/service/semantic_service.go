@@ -8,9 +8,9 @@ import (
 	"muara.bi/core/internal/domain/entity"
 	"muara.bi/core/internal/dto/request"
 	"muara.bi/core/internal/dto/response"
-	"muara.bi/core/internal/duckdb"
-	"muara.bi/core/internal/helper/sqlident"
 	"muara.bi/core/internal/repository/pgsql"
+	"muara.bi/engine/duckdb"
+	"muara.bi/engine/sqlident"
 )
 
 type SemanticServiceProvider interface {

@@ -12,11 +12,11 @@ import (
 
 	"github.com/hibiken/asynq"
 	"muara.bi/core/internal/domain/entity"
-	"muara.bi/core/internal/duckdb"
-	"muara.bi/core/internal/exporter"
 	"muara.bi/core/internal/repository/pgsql"
 	"muara.bi/core/internal/service"
 	"muara.bi/core/pkg/logging"
+	"muara.bi/engine/duckdb"
+	"muara.bi/engine/exporter"
 )
 
 // DigestWorker renders a multi-sheet spreadsheet report and dispatches it

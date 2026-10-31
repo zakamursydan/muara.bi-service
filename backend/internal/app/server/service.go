@@ -7,12 +7,12 @@ import (
 	"github.com/hibiken/asynq"
 	"muara.bi/core/internal/cache"
 	"muara.bi/core/internal/config"
-	"muara.bi/core/internal/duckdb"
-	"muara.bi/core/internal/helper/cryptohelper"
 	"muara.bi/core/internal/limiter"
 	"muara.bi/core/internal/service"
-	"muara.bi/core/internal/ssh"
 	"muara.bi/core/pkg/logging"
+	"muara.bi/engine/cryptohelper"
+	"muara.bi/engine/duckdb"
+	"muara.bi/engine/ssh"
 )
 
 // AnalyticalSlotKey is the Redis member set every process contends for. It is

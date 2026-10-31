@@ -37,10 +37,10 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
 
 ## 3. Status Terkini (Current Snapshot)
 
-- **Update Terakhir:** 2026-10-19
+- **Update Terakhir:** 2026-10-31
 - **Fase Selesai:** Phase 1, Phase 2, Phase 3 (100% Backend Complete), Phase 4 (100% Frontend) & Phase 5 (E2E Integration, Docker Packaging & Testing)
-- **Fase Aktif:** — (seluruh checklist Phase 1–5 `[x]`; menunggu arahan fase berikutnya)
-- **Subtask Saat Ini:** Phase 5 selesai — seluruh checklist `[x]`. Image `muara-bi-core:dev` dan `muara-bi-web:dev` ter-build & ter-smoke-test; federated query Postgres+MongoDB, cache/RLS, concurrency budget Redis + bobot antrean Asynq, dispatch alert Telegram/Slack/Webhook, dan `docker compose up` stack penuh sudah tervalidasi. `go build/vet/test ./...` hijau (exit 0, tanpa FAIL). Verifikasi compose dilakukan tanpa menghentikan dev server milik user: infra yang sudah jalan dipakai ulang lewat `--no-deps` dan aplikasi di-publish pada port alternatif 18080/18000.
+- **Fase Aktif:** Refactor lintas-produk **M1** (lihat `muara.bi-desktop/PLAN.md`) — engine analitik keluar `internal/` supaya dipakai ulang oleh muara.bi Desktop tanpa salinan kedua. Phase 1–5 tetap `[x]`.
+- **Subtask Saat Ini:** M1.3 selesai — `backend/engine/` kini modul Go `muara.bi/engine`; web memakai lewat `replace`. Sisa checklist M1 ada di §3 "Paket engine" di bawah dan di PROGRESS desktop.
 - **Kondisi Backend Terakhir yang Terverifikasi:**
   - Public Sharing & Signed JWT Embed teruji & terpasang.
   - Scheduled Digest & Threshold Alerts Dispatcher teruji & terhubung ke Asynq scheduler.
@@ -63,6 +63,36 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   - Artefak verifikasi yang perlu diketahui: saat panel Browser Qoder tidak terlihat, `requestAnimationFrame` disuspend sehingga series beranimasi tidak ter-paint (axis, legenda, dan title tetap tampil) — ini bukan bug kode. Untuk mengambil screenshot, `animation: false` dipasang sementara lalu dikembalikan; hasil render diverifikasi dari `canvas.toDataURL()` karena `take_screenshot` menolak surface tersembunyi.
   - Widget demo baru di dashboard `12715684-…`: "Komposisi revenue per channel" (pie, palet Pastel) dan "Tren revenue bulanan" (area 2 series) untuk menguji legenda, donut, dan sumbu tanggal.
   - Catatan dev-only yang belum ditangani: warningcontrolled/uncontrolled pada `<Select value={x ?? undefined}>`, notice Next.js "Dropped segment" untuk `/dashboards/[dashboardId]`, Monaco dimuat dari CDN, kanal alert EMAIL hanya menulis log, dan halaman "Exports & Jobs" belum punya endpoint HTTP.
+
+### Modul engine `muara.bi/engine` (M1.3, 2026-10-31)
+- **Batas baru:** `backend/internal/{duckdb,exporter,ssh,ai}` dan `backend/internal/helper/{cryptohelper,sqlident}`
+  pindah (semuanya `git mv`, tercatat sebagai rename — tidak pernah ada dua salinan) ke
+  `backend/engine/{duckdb,exporter,ssh,ai,cryptohelper,sqlident}`, plus `engine/builder/` yang menggabungkan
+  `service/widget_builder.go` + `domain/entity/widget_builder.go` (3 struct builder + kompilatornya,
+  `package builder`). Import lama `muara.bi/core/internal/...` sudah nol di seluruh repo.
+- **Cara web mengambilnya:** `backend/engine/go.mod` (`module muara.bi/engine`, `go 1.27.1`, `go.sum` sendiri)
+  dan di `backend/go.mod`: `require muara.bi/engine v0.0.0` + `replace muara.bi/engine => ./engine`.
+  Desktop (belum ada `go.mod`-nya) akan memakai replace ke path yang sama, bukan menyalin.
+- **Aturan yang dijaga:** engine tidak boleh mengimpor `muara.bi/core/...` (akan membuat siklus modul);
+  diverifikasi `grep -r muara.bi/core backend/engine/` → nol. Dependensi eksternal engine hanya empat:
+  `go-duckdb`, `excelize/v2`, `mongo-driver`, `x/crypto/ssh` — tidak ada `pgx`/`chi`/`asynq`/`redis`.
+  `internal/helper/dberr` dan `session_preparer.go` sengaja **tinggal** di web (memetakan error Postgres
+  dan menempel repository/limiter/logging — orkestrasi, bukan engine).
+- **Istilah tenant dihapus dari API engine:** `duckdb.SemanticModel` tidak lagi punya `WorkspaceID`/`ProjectID`
+  (satu-satunya `workspace_id` yang tersisa di engine); pemetaan entity → struct engine terjadi di
+  `internal/service/session_preparer.go:142`. Ini prasyarat desktop: di sana tidak ada workspace sama sekali.
+- **Dua jebakan yang ikut dibetulkan:** (1) modul bersarang membuat `go test ./...` di `backend/` **tidak**
+  menyentuh engine lagi — `make test`/`vet`/`tidy` kini menjalankan dua modul, engine lebih dulu;
+  (2) `go mod download` dengan `replace` ke folder lokal butuh `go.mod` targetnya sudah ada — `Dockerfile`
+  stage `build` sekarang men-COPY `backend/engine/go.mod` + `go.sum` ke `./engine/` sebelum step download.
+  **Belum diverifikasi lewat `docker build`** (daemon Docker mati saat sesi ini) — jalankan `make image-core`.
+- **Gerbang verifikasi:** `go build`/`go vet`/`go test` hijau di **dua** modul × **dua** mode
+  (`CGO_ENABLED=1` dan `CGO_ENABLED=0`), `gofmt -l` bersih. Perilaku CGO fail-fast M1.2 tetap terbukti:
+  tanpa CGO, `duckdb.NewEngine` mengembalikan `ErrCGODisabled` dan tes engine lain `t.Skip`.
+- **Catatan Phase 5 yang masih berlaku:** verifikasi compose dulu dilakukan tanpa menghentikan dev server
+  milik user — infra yang sudah jalan dipakai ulang lewat `--no-deps` dan aplikasi dipublikasikan pada port
+  alternatif 18080/18000; `muara-bi-core:dev` + `muara-bi-web:dev` ter-smoke-test, federated query
+  Postgres+MongoDB, cache/RLS, budget Redis + bobot Asynq, dan dispatch alert sudah tervalidasi.
 
 ### Paket Docker (Phase 5.1) — fakta teknis yang sudah diverifikasi
 - **Kemasan DuckDB:** `go-duckdb v1.8.5` membundel `libduckdb.a` untuk `linux_amd64`/`linux_arm64` (glibc + libstdc++), DuckDB internal versi **v1.1.3**, dan **tidak** punya build tag `STATIC_EXTENSIONS`. Karena itu: runtime image `debian:bookworm-slim` (bukan Alpine/musl), dan ekstensi `postgres`/`mysql`/`sqlite` dipre-bundle ke `/opt/duckdb/extensions`.

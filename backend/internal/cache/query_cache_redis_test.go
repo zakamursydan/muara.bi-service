@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"muara.bi/core/internal/duckdb"
+	"muara.bi/engine/duckdb"
 )
 
 // Runs the real Redis round-trip behind ExecuteCachedOrLive: hit/miss accounting,

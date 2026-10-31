@@ -17,10 +17,10 @@ import (
 	"muara.bi/core/internal/domain/entity"
 	"muara.bi/core/internal/dto/request"
 	"muara.bi/core/internal/dto/response"
-	"muara.bi/core/internal/duckdb"
 	"muara.bi/core/internal/repository/pgsql"
 	"muara.bi/core/pkg/customerror"
 	"muara.bi/core/pkg/logging"
+	"muara.bi/engine/duckdb"
 )
 
 const (

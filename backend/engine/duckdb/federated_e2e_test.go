@@ -14,7 +14,7 @@ import (
 // PostgreSQL is mounted through postgres_scanner, MongoDB through the Go
 // streaming adapter, and both are joined inside one DuckDB session.
 //
-//	MUARA_E2E_FEDERATED=1 go test ./internal/duckdb -run Federated -v
+//	MUARA_E2E_FEDERATED=1 go test ./engine/duckdb -run Federated -v
 //
 // Optional overrides: MUARA_E2E_PG_DSN, MUARA_E2E_MONGO_URI, MUARA_E2E_MONGO_DB.
 func TestFederatedPostgresMongo(t *testing.T) {

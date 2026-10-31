@@ -7,16 +7,16 @@ import (
 	"regexp"
 	"strings"
 
-	"muara.bi/core/internal/ai"
 	"muara.bi/core/internal/config"
 	"muara.bi/core/internal/domain/entity"
 	"muara.bi/core/internal/dto/request"
 	"muara.bi/core/internal/dto/response"
-	"muara.bi/core/internal/duckdb"
-	"muara.bi/core/internal/helper/cryptohelper"
 	"muara.bi/core/internal/repository/pgsql"
 	"muara.bi/core/pkg/customerror"
 	"muara.bi/core/pkg/logging"
+	"muara.bi/engine/ai"
+	"muara.bi/engine/cryptohelper"
+	"muara.bi/engine/duckdb"
 )
 
 type AIServiceProvider interface {
