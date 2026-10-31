@@ -102,11 +102,15 @@ func (s *QueryService) ExecuteQuery(
 	}
 
 	return &response.ExecuteQueryResponse{
-		Columns:    result.Columns,
-		Rows:       result.Rows,
-		RowCount:   result.RowCount,
-		DurationMs: result.DurationMs,
-		Cached:     cached,
-		EnvTag:     envTag,
+		Columns:       result.Columns,
+		Rows:          result.Rows,
+		RowCount:      result.RowCount,
+		DurationMs:    result.DurationMs,
+		RowLimit:      result.RowLimit,
+		Truncated:     result.Truncated,
+		TruncatedBy:   result.TruncatedBy,
+		CappedSources: result.CappedSources,
+		Cached:        cached,
+		EnvTag:        envTag,
 	}, nil
 }

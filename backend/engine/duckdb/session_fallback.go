@@ -42,7 +42,7 @@ func (disabledSession) RegisterJSONData(ctx context.Context, viewName string, js
 	return ErrCGODisabled
 }
 
-func (disabledSession) Query(ctx context.Context, sqlQuery string, args ...any) (*QueryResult, error) {
+func (disabledSession) Query(ctx context.Context, sqlQuery string, opts QueryOptions, args ...any) (*QueryResult, error) {
 	return nil, ErrCGODisabled
 }
 

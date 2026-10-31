@@ -22,6 +22,53 @@ type QueryResult struct {
 	Rows       []map[string]any `json:"rows"`
 	RowCount   int64            `json:"row_count"`
 	DurationMs int64            `json:"duration_ms"`
+
+	// RowLimit is the row cap that was in force for this statement (always
+	// reported, so a caller can tell a full answer from a capped one).
+	RowLimit int `json:"row_limit"`
+
+	// Truncated is the BRD §7.3 contract: a result that is not the complete
+	// answer must say so. The engine decides it, never the UI.
+	Truncated bool `json:"truncated"`
+
+	// TruncatedBy names the mechanism; empty when Truncated is false.
+	TruncatedBy TruncateReason `json:"truncated_by,omitempty"`
+
+	// CappedSources lists the mounted views whose source read was capped, e.g.
+	// a MongoDB collection that streamed the maximum document count.
+	CappedSources []string `json:"capped_sources,omitempty"`
+}
+
+// TruncateReason is why a QueryResult is not the full answer.
+type TruncateReason string
+
+const (
+	// TruncateRowLimit means the platform row cap cut rows the query itself
+	// would have produced.
+	TruncateRowLimit TruncateReason = "row_limit"
+
+	// TruncateSourceCap means the source was read only partially before DuckDB
+	// ever saw it (a MongoDB document cap, a partial file read).
+	TruncateSourceCap TruncateReason = "source_cap"
+)
+
+// QueryOptions carries the row budget of one execution.
+type QueryOptions struct {
+	// MaxRows is the platform row cap. Zero or below uses DefaultMaxRows; the
+	// engine always enforces one, so no caller can request an unbounded read.
+	MaxRows int
+
+	// CappedSources names mounted views whose source read was already truncated
+	// (see StreamMongoCollections). It is reported back on the result.
+	CappedSources []string
+}
+
+// rowLimit resolves the cap in force for one execution.
+func (o QueryOptions) rowLimit() int {
+	if o.MaxRows <= 0 {
+		return DefaultMaxRows
+	}
+	return o.MaxRows
 }
 
 // Session represents an isolated in-memory analytical query session
@@ -41,8 +88,9 @@ type Session interface {
 	// RegisterJSONData mounts an in-memory JSON array as a temporary table/view
 	RegisterJSONData(ctx context.Context, viewName string, jsonData []byte) error
 
-	// Query executes an analytical query with parameterized arguments
-	Query(ctx context.Context, sql string, args ...any) (*QueryResult, error)
+	// Query executes an analytical statement under opts.MaxRows and reports
+	// honestly whether the answer was cut short.
+	Query(ctx context.Context, sql string, opts QueryOptions, args ...any) (*QueryResult, error)
 
 	// Close terminates the session and frees all allocated in-memory buffers
 	Close() error

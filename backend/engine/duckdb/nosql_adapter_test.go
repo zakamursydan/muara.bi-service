@@ -89,6 +89,25 @@ func TestMongoViewName(t *testing.T) {
 	}
 }
 
+func TestCappedMongoViews(t *testing.T) {
+	mounts := []MongoMount{
+		{Collection: "orders", View: "logs_orders", Documents: 12},
+		{Collection: "sessions", View: "logs_sessions", Documents: DefaultMongoDocLimit, Truncated: true},
+		{Collection: "empty", View: "logs_empty", Documents: 0},
+	}
+
+	got := CappedMongoViews(mounts)
+	if len(got) != 1 || got[0] != "logs_sessions" {
+		t.Fatalf("capped views = %v, want [logs_sessions]", got)
+	}
+
+	// Nothing capped must read as "no cap", not as an empty list the caller has
+	// to re-check element by element.
+	if capped := CappedMongoViews([]MongoMount{{View: "logs_orders"}}); capped != nil {
+		t.Errorf("uncapped mounts reported as %v, want nil", capped)
+	}
+}
+
 func TestStreamMongoCollectionsRejectsIncompleteConfig(t *testing.T) {
 	// The mount must fail before dialing when the alias or database is missing,
 	// otherwise every query would pay a connection timeout for a doomed attach.

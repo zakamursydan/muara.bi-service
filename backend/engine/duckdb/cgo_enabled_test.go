@@ -23,7 +23,7 @@ func TestEngine_WithCGOAnswers(t *testing.T) {
 	}
 	defer session.Close()
 
-	res, err := session.Query(ctx, "SELECT 1 AS one")
+	res, err := session.Query(ctx, "SELECT 1 AS one", QueryOptions{})
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}

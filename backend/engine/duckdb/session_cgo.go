@@ -156,15 +156,20 @@ func (s *cgoSession) RegisterJSONData(ctx context.Context, viewName string, json
 	return nil
 }
 
-func (s *cgoSession) Query(ctx context.Context, sqlQuery string, args ...any) (*QueryResult, error) {
+func (s *cgoSession) Query(ctx context.Context, sqlQuery string, opts QueryOptions, args ...any) (*QueryResult, error) {
 	if s.statementTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, s.statementTimeout)
 		defer cancel()
 	}
 
+	// The cap the caller is served, and the cap the statement is run under: the
+	// extra row is only a sentinel that proves whether more rows existed.
+	rowLimit := opts.rowLimit()
+	plan := PlanLimit(sqlQuery, rowLimit+1)
+
 	start := time.Now()
-	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
+	rows, err := s.db.QueryContext(ctx, plan.SQL, args...)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return nil, fmt.Errorf("query exceeded the %s statement timeout: %w", s.statementTimeout, err)
@@ -193,6 +198,7 @@ func (s *cgoSession) Query(ctx context.Context, sqlQuery string, args ...any) (*
 		return nil, fmt.Errorf("failed to read column names: %w", err)
 	}
 
+	overCap := false
 	for rows.Next() {
 		values := make([]any, len(colNames))
 		valuePtrs := make([]any, len(colNames))
@@ -209,20 +215,44 @@ func (s *cgoSession) Query(ctx context.Context, sqlQuery string, args ...any) (*
 			rowMap[colName] = jsonValue(values[i])
 		}
 		resultRows = append(resultRows, rowMap)
+
+		if len(resultRows) > rowLimit {
+			overCap = true
+			break
+		}
 	}
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error during row iteration: %w", err)
 	}
 
+	if overCap {
+		resultRows = resultRows[:rowLimit]
+	}
+
 	duration := time.Since(start).Milliseconds()
 
-	return &QueryResult{
-		Columns:    columns,
-		Rows:       resultRows,
-		RowCount:   int64(len(resultRows)),
-		DurationMs: duration,
-	}, nil
+	result := &QueryResult{
+		Columns:       columns,
+		Rows:          resultRows,
+		RowCount:      int64(len(resultRows)),
+		DurationMs:    duration,
+		RowLimit:      rowLimit,
+		CappedSources: opts.CappedSources,
+	}
+
+	switch {
+	case overCap:
+		result.Truncated = true
+		result.TruncatedBy = TruncateRowLimit
+	case len(opts.CappedSources) > 0:
+		// The statement answered in full, but part of what it could read was
+		// already cut off at the source, so the number is not the whole truth.
+		result.Truncated = true
+		result.TruncatedBy = TruncateSourceCap
+	}
+
+	return result, nil
 }
 
 // jsonValue flattens driver-only types into values the API envelope can encode.

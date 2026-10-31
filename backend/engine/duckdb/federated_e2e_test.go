@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"strconv"
 	"testing"
 )
@@ -48,7 +47,7 @@ func TestFederatedPostgresMongo(t *testing.T) {
 		t.Fatalf("attach postgres: %v", err)
 	}
 
-	views, err := StreamMongoCollections(ctx, session, MongoCollectionStream{
+	mounts, err := StreamMongoCollections(ctx, session, MongoCollectionStream{
 		URI:      mongoURI,
 		Database: mongoDB,
 		Alias:    "logs",
@@ -56,10 +55,20 @@ func TestFederatedPostgresMongo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stream mongodb: %v", err)
 	}
-	sort.Strings(views)
-	wantViews := []string{"logs_page_views", "logs_sessions"}
-	if len(views) != len(wantViews) || views[0] != wantViews[0] || views[1] != wantViews[1] {
-		t.Fatalf("mounted views = %v, want %v", views, wantViews)
+	mounted := make(map[string]int64, len(mounts))
+	for _, m := range mounts {
+		mounted[m.View] = m.Documents
+	}
+	for _, want := range []string{"logs_page_views", "logs_sessions"} {
+		if _, ok := mounted[want]; !ok {
+			t.Fatalf("mounted views = %v, want %s in it", mounted, want)
+		}
+	}
+	// Listing the document counts is the evidence that a Mongo aggregate over
+	// more than DefaultMongoDocLimit documents would have to be flagged.
+	t.Logf("mongodb mount: %v", mounted)
+	if capped := CappedMongoViews(mounts); len(capped) > 0 {
+		t.Logf("source-capped collections: %v", capped)
 	}
 
 	for _, tc := range []struct {
@@ -180,13 +189,12 @@ func TestFederatedPostgresMongo(t *testing.T) {
 				sqlText = binding.ParameterizedSQL
 				bound = binding.OrderedArgs
 			}
-			sqlText = ApplyLimit(sqlText, 10000)
-
-			res, err := session.Query(ctx, sqlText, bound...)
+			res, err := session.Query(ctx, sqlText, QueryOptions{MaxRows: 10000}, bound...)
 			if err != nil {
 				t.Fatalf("query: %v", err)
 			}
-			t.Logf("%d rows in %dms", res.RowCount, res.DurationMs)
+			t.Logf("%d rows in %dms (row_limit=%d truncated=%v by=%q)",
+				res.RowCount, res.DurationMs, res.RowLimit, res.Truncated, res.TruncatedBy)
 			tc.check(t, res)
 		})
 	}

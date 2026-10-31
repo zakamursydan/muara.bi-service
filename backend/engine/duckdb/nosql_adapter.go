@@ -48,12 +48,37 @@ type MongoCollectionStream struct {
 	TimeoutSeconds int
 }
 
+// MongoMount records what one MongoDB collection contributed to a session.
+// Streaming is the only way DuckDB can see a NoSQL source, so the document count
+// and the cap are the engine's evidence for BRD §7.3: a collection that streamed
+// exactly the limit was cut off, and any aggregate over it is not the whole truth.
+type MongoMount struct {
+	Collection string `json:"collection"`
+	View       string `json:"view"`
+	Documents  int64  `json:"documents"`
+	Truncated  bool   `json:"truncated"`
+}
+
+// CappedMongoViews returns the mounted views whose document read hit the cap.
+func CappedMongoViews(mounts []MongoMount) []string {
+	capped := make([]string, 0, len(mounts))
+	for _, m := range mounts {
+		if m.Truncated {
+			capped = append(capped, m.View)
+		}
+	}
+	if len(capped) == 0 {
+		return nil
+	}
+	return capped
+}
+
 // StreamMongoToSession queries MongoDB, flattens documents, and registers them as
 // an in-memory DuckDB temporary view.
-func StreamMongoToSession(ctx context.Context, session Session, viewName string, cfg MongoAdapterConfig) error {
+func StreamMongoToSession(ctx context.Context, session Session, viewName string, cfg MongoAdapterConfig) (MongoMount, error) {
 	client, err := connectMongo(ctx, cfg.URI, cfg.TimeoutSeconds)
 	if err != nil {
-		return err
+		return MongoMount{}, err
 	}
 	defer disconnectMongo(client)
 
@@ -61,10 +86,10 @@ func StreamMongoToSession(ctx context.Context, session Session, viewName string,
 }
 
 // StreamMongoCollections registers every collection of the database as a
-// `<alias>_<collection>` temporary view and returns the view names it mounted.
+// `<alias>_<collection>` temporary view and reports what each one contributed.
 // Views are named rather than attached because DuckDB has no MongoDB scanner:
 // the flattened JSON is the only representation the planner can see.
-func StreamMongoCollections(ctx context.Context, session Session, cfg MongoCollectionStream) ([]string, error) {
+func StreamMongoCollections(ctx context.Context, session Session, cfg MongoCollectionStream) ([]MongoMount, error) {
 	if cfg.Alias == "" {
 		return nil, fmt.Errorf("mongodb stream needs a connection alias")
 	}
@@ -90,7 +115,7 @@ func StreamMongoCollections(ctx context.Context, session Session, cfg MongoColle
 			cfg.Database, len(names), MaxMongoCollections)
 	}
 
-	views := make([]string, 0, len(names))
+	mounts := make([]MongoMount, 0, len(names))
 	seen := make(map[string]string, len(names))
 	for _, name := range names {
 		view := MongoViewName(cfg.Alias, name)
@@ -101,18 +126,19 @@ func StreamMongoCollections(ctx context.Context, session Session, cfg MongoColle
 		}
 		seen[view] = name
 
-		if err := streamCollection(ctx, client, session, cfg.Database, name, view, MongoAdapterConfig{
+		mount, err := streamCollection(ctx, client, session, cfg.Database, name, view, MongoAdapterConfig{
 			URI:            cfg.URI,
 			Database:       cfg.Database,
 			Limit:          DefaultMongoDocLimit,
 			TimeoutSeconds: cfg.TimeoutSeconds,
-		}); err != nil {
+		})
+		if err != nil {
 			return nil, err
 		}
-		views = append(views, view)
+		mounts = append(mounts, mount)
 	}
 
-	return views, nil
+	return mounts, nil
 }
 
 var nonIdentifier = regexp.MustCompile(`[^A-Za-z0-9_]+`)
@@ -191,18 +217,17 @@ func streamCollection(
 	collection string,
 	viewName string,
 	cfg MongoAdapterConfig,
-) error {
+) (MongoMount, error) {
 	mongoCtx, cancel := mongoContext(ctx, cfg.TimeoutSeconds)
 	defer cancel()
 
 	coll := client.Database(database).Collection(collection)
 
-	findOpts := options.Find()
-	if cfg.Limit > 0 {
-		findOpts.SetLimit(cfg.Limit)
-	} else {
-		findOpts.SetLimit(DefaultMongoDocLimit)
+	docLimit := cfg.Limit
+	if docLimit <= 0 {
+		docLimit = DefaultMongoDocLimit
 	}
+	findOpts := options.Find().SetLimit(docLimit)
 
 	filter := bson.M{}
 	for k, v := range cfg.Filter {
@@ -211,7 +236,7 @@ func streamCollection(
 
 	cursor, err := coll.Find(mongoCtx, filter, findOpts)
 	if err != nil {
-		return fmt.Errorf("mongodb query on %s.%s failed: %w", database, collection, err)
+		return MongoMount{}, fmt.Errorf("mongodb query on %s.%s failed: %w", database, collection, err)
 	}
 	defer cursor.Close(mongoCtx)
 
@@ -221,7 +246,7 @@ func streamCollection(
 	for cursor.Next(mongoCtx) {
 		var rawDoc map[string]any
 		if err := cursor.Decode(&rawDoc); err != nil {
-			return fmt.Errorf("failed to decode mongodb doc: %w", err)
+			return MongoMount{}, fmt.Errorf("failed to decode mongodb doc: %w", err)
 		}
 
 		flattened := make(map[string]any)
@@ -230,18 +255,25 @@ func streamCollection(
 	}
 
 	if err := cursor.Err(); err != nil {
-		return fmt.Errorf("mongodb cursor error on %s.%s: %w", database, collection, err)
+		return MongoMount{}, fmt.Errorf("mongodb cursor error on %s.%s: %w", database, collection, err)
 	}
 
 	jsonBuffer, err := json.Marshal(flattenedDocs)
 	if err != nil {
-		return fmt.Errorf("failed to marshal mongodb documents: %w", err)
+		return MongoMount{}, fmt.Errorf("failed to marshal mongodb documents: %w", err)
 	}
 
 	if err := session.RegisterJSONData(ctx, viewName, jsonBuffer); err != nil {
-		return fmt.Errorf("failed to register mongodb view %s in duckdb: %w", viewName, err)
+		return MongoMount{}, fmt.Errorf("failed to register mongodb view %s in duckdb: %w", viewName, err)
 	}
-	return nil
+
+	documents := int64(len(flattenedDocs))
+	return MongoMount{
+		Collection: collection,
+		View:       viewName,
+		Documents:  documents,
+		Truncated:  documents >= docLimit,
+	}, nil
 }
 
 // flattenMap recursively flattens nested maps into dot/underscore keys

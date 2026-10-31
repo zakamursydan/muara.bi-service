@@ -92,9 +92,8 @@ func (p *SessionPreparer) Execute(ctx context.Context, q PreparedQuery) (*duckdb
 
 	maxRows := q.MaxRows
 	if maxRows <= 0 {
-		maxRows = 10000
+		maxRows = duckdb.DefaultMaxRows
 	}
-	sqlText = duckdb.ApplyLimit(sqlText, maxRows)
 
 	// The budget is taken after the cheap validation and SQL rewrite, so a query
 	// that could never run does not consume a slot or make a valid one wait.
@@ -117,11 +116,17 @@ func (p *SessionPreparer) Execute(ctx context.Context, q PreparedQuery) (*duckdb
 	if err := p.mountSemanticModels(ctx, session, q); err != nil {
 		return nil, err
 	}
-	if err := p.attachConnections(ctx, session, q.WorkspaceID, NormalizeEnvTag(q.EnvTag)); err != nil {
+	cappedSources, err := p.attachConnections(ctx, session, q.WorkspaceID, NormalizeEnvTag(q.EnvTag))
+	if err != nil {
 		return nil, err
 	}
 
-	return session.Query(ctx, sqlText, args...)
+	// The row cap is enforced by the engine, which also reports honestly whether
+	// it cut the answer short (BRD §7.3).
+	return session.Query(ctx, sqlText, duckdb.QueryOptions{
+		MaxRows:       maxRows,
+		CappedSources: cappedSources,
+	}, args...)
 }
 
 func (p *SessionPreparer) mountSemanticModels(ctx context.Context, session duckdb.Session, q PreparedQuery) error {
@@ -156,13 +161,16 @@ func (p *SessionPreparer) mountSemanticModels(ctx context.Context, session duckd
 // attachConnections binds every workspace alias that has a credential profile
 // for the active environment tag. Aliases without a matching profile are
 // skipped so one unconfigured environment cannot break unrelated queries.
-func (p *SessionPreparer) attachConnections(ctx context.Context, session duckdb.Session, wsID, envTag string) error {
+// It returns the mounted views whose source read was capped, which the executed
+// query has to declare as truncation.
+func (p *SessionPreparer) attachConnections(ctx context.Context, session duckdb.Session, wsID, envTag string) ([]string, error) {
 	conns, err := p.connRepo.ListConnections(ctx, wsID)
 	if err != nil {
-		return fmt.Errorf("failed to list workspace connections: %w", err)
+		return nil, fmt.Errorf("failed to list workspace connections: %w", err)
 	}
 
 	attempted, failed := 0, 0
+	capped := make([]string, 0)
 	var lastErr error
 	for _, conn := range conns {
 		cfg, _, err := p.connService.GetDecryptedConfig(ctx, wsID, conn.ID, envTag)
@@ -170,25 +178,28 @@ func (p *SessionPreparer) attachConnections(ctx context.Context, session duckdb.
 			continue
 		}
 		attempted++
-		if err := attachConnection(ctx, session, conn, cfg); err != nil {
+		viewCapped, err := attachConnection(ctx, session, conn, cfg)
+		if err != nil {
 			failed++
 			lastErr = err
 			p.logger.Warn(fmt.Sprintf("failed to attach alias %s (env=%s): %v", conn.AliasName, envTag, err))
+			continue
 		}
+		capped = append(capped, viewCapped...)
 	}
 
 	// When every source configured for this environment failed, the query would
 	// only die later on an unrelated "table does not exist" catalog error.
 	if attempted > 0 && failed == attempted {
-		return customerror.NewBadRequestError(
+		return nil, customerror.NewBadRequestError(
 			fmt.Sprintf("no data source could be attached for environment %q", envTag),
 			lastErr,
 		)
 	}
-	return nil
+	return capped, nil
 }
 
-func attachConnection(ctx context.Context, session duckdb.Session, conn entity.DataConnection, cfg *entity.ConnectionConfig) error {
+func attachConnection(ctx context.Context, session duckdb.Session, conn entity.DataConnection, cfg *entity.ConnectionConfig) ([]string, error) {
 	switch conn.DriverType {
 	case "postgres":
 		sslMode := cfg.SSLMode
@@ -197,29 +208,29 @@ func attachConnection(ctx context.Context, session duckdb.Session, conn entity.D
 		}
 		dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 			cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, sslMode)
-		return session.AttachPostgres(ctx, conn.AliasName, dsn)
+		return nil, session.AttachPostgres(ctx, conn.AliasName, dsn)
 	case "mysql":
 		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
-		return session.AttachMySQL(ctx, conn.AliasName, dsn)
+		return nil, session.AttachMySQL(ctx, conn.AliasName, dsn)
 	case "sqlite":
-		return session.AttachSQLite(ctx, conn.AliasName, cfg.Database)
+		return nil, session.AttachSQLite(ctx, conn.AliasName, cfg.Database)
 	case "mongodb":
-		views, err := duckdb.StreamMongoCollections(ctx, session, duckdb.MongoCollectionStream{
+		mounts, err := duckdb.StreamMongoCollections(ctx, session, duckdb.MongoCollectionStream{
 			URI:      mongoURI(cfg),
 			Database: cfg.Database,
 			Alias:    conn.AliasName,
 		})
 		if err != nil {
-			return err
+			return nil, err
 		}
 		// A database with no collections mounts nothing, which would otherwise look
 		// like a successful attach and then fail on an unknown table.
-		if len(views) == 0 {
-			return fmt.Errorf("mongodb database %q has no collections to mount", cfg.Database)
+		if len(mounts) == 0 {
+			return nil, fmt.Errorf("mongodb database %q has no collections to mount", cfg.Database)
 		}
-		return nil
+		return duckdb.CappedMongoViews(mounts), nil
 	default:
-		return fmt.Errorf("no duckdb attach strategy for driver %q", conn.DriverType)
+		return nil, fmt.Errorf("no duckdb attach strategy for driver %q", conn.DriverType)
 	}
 }
 

@@ -41,6 +41,11 @@ var trailingLimit = regexp.MustCompile(`(?i)\bLIMIT\s+(\d+)(\s+OFFSET\s+\d+)?\s*
 // Regex to find template parameters like {{param_name}} or {{ param_name }}
 var templateParamPattern = regexp.MustCompile(`\{\{\s*([a-zA-Z0-9_]+)\s*\}\}`)
 
+// DefaultMaxRows is the platform row cap applied when a caller does not ask for
+// one. Every analytical statement is executed under a LIMIT: an unbounded read
+// of a remote table would exhaust the session's memory budget.
+const DefaultMaxRows = 10000
+
 // GuardrailConfig holds execution limits
 type GuardrailConfig struct {
 	MaxRows          int           `json:"max_rows"`
@@ -53,7 +58,7 @@ type GuardrailConfig struct {
 // DefaultGuardrailConfig returns standard enterprise guardrails
 func DefaultGuardrailConfig() GuardrailConfig {
 	return GuardrailConfig{
-		MaxRows:          10000,
+		MaxRows:          DefaultMaxRows,
 		StatementTimeout: 30 * time.Second,
 	}
 }
@@ -90,14 +95,23 @@ func stripSQLComments(sql string) string {
 	return strings.TrimSpace(sql)
 }
 
-// ApplyLimit guarantees the statement returns at most maxRows rows. An author's
-// own trailing LIMIT may only narrow that cap, never raise it; ignoring one that
-// was already present would let `LIMIT 999999999` defeat the row guardrail. A
-// LIMIT inside a subquery is left alone because it does not bound the outer row
-// count, so one is still appended.
-func ApplyLimit(query string, maxRows int) string {
+// LimitPlan is one policed statement plus the row cap it now enforces.
+type LimitPlan struct {
+	SQL string
+	// Limit is the trailing LIMIT the statement carries after policing.
+	Limit int
+	// Injected is true when the platform added or widened the clause, i.e. the
+	// author's own text did not already bound the row count this tightly.
+	Injected bool
+}
+
+// PlanLimit is ApplyLimit plus the accounting the executor needs to report
+// truncation honestly. The cap is widened by one row: that sentinel row is
+// fetched and discarded, and its existence is how the engine knows the answer
+// was cut short instead of guessing from a full-looking page.
+func PlanLimit(query string, maxRows int) LimitPlan {
 	if maxRows <= 0 {
-		maxRows = 10000
+		maxRows = DefaultMaxRows
 	}
 
 	trimmed := strings.TrimSpace(query)
@@ -106,13 +120,30 @@ func ApplyLimit(query string, maxRows int) string {
 
 	if m := trailingLimit.FindStringSubmatch(trimmed); m != nil {
 		if authorLimit, err := strconv.Atoi(m[1]); err == nil && authorLimit <= maxRows {
-			return trimmed
+			return LimitPlan{SQL: trimmed, Limit: authorLimit}
 		}
 		prefix := trimmed[:len(trimmed)-len(m[0])]
-		return fmt.Sprintf("%sLIMIT %d%s", prefix, maxRows, m[2])
+		return LimitPlan{
+			SQL:      fmt.Sprintf("%sLIMIT %d%s", prefix, maxRows, m[2]),
+			Limit:    maxRows,
+			Injected: true,
+		}
 	}
 
-	return fmt.Sprintf("%s LIMIT %d", trimmed, maxRows)
+	return LimitPlan{
+		SQL:      fmt.Sprintf("%s LIMIT %d", trimmed, maxRows),
+		Limit:    maxRows,
+		Injected: true,
+	}
+}
+
+// ApplyLimit guarantees the statement returns at most maxRows rows. An author's
+// own trailing LIMIT may only narrow that cap, never raise it; ignoring one that
+// was already present would let `LIMIT 999999999` defeat the row guardrail. A
+// LIMIT inside a subquery is left alone because it does not bound the outer row
+// count, so one is still appended.
+func ApplyLimit(query string, maxRows int) string {
+	return PlanLimit(query, maxRows).SQL
 }
 
 // ParameterBinding transforms {{param}} into parameterized $1, $2 and extracts ordered values

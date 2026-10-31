@@ -40,7 +40,7 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
 - **Update Terakhir:** 2026-10-31
 - **Fase Selesai:** Phase 1, Phase 2, Phase 3 (100% Backend Complete), Phase 4 (100% Frontend) & Phase 5 (E2E Integration, Docker Packaging & Testing)
 - **Fase Aktif:** Refactor lintas-produk **M1** (lihat `muara.bi-desktop/PLAN.md`) — engine analitik keluar `internal/` supaya dipakai ulang oleh muara.bi Desktop tanpa salinan kedua. Phase 1–5 tetap `[x]`.
-- **Subtask Saat Ini:** M1.3 selesai — `backend/engine/` kini modul Go `muara.bi/engine`; web memakai lewat `replace`. Sisa checklist M1 ada di §3 "Paket engine" di bawah dan di PROGRESS desktop.
+- **Subtask Saat Ini:** M1.4 selesai — pemotongan baris kini kontrak engine (`QueryOptions` + `QueryResult.Truncated`/`TruncatedBy`), web tinggal merender. Sisa checklist M1: M1.5 `max_memory` jadi konfigurasi, lalu `make image-core` (butuh Docker aktif). Detail di §3 "Kontrak pemotongan" di bawah dan di PROGRESS desktop.
 - **Kondisi Backend Terakhir yang Terverifikasi:**
   - Public Sharing & Signed JWT Embed teruji & terpasang.
   - Scheduled Digest & Threshold Alerts Dispatcher teruji & terhubung ke Asynq scheduler.
@@ -93,6 +93,31 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   milik user — infra yang sudah jalan dipakai ulang lewat `--no-deps` dan aplikasi dipublikasikan pada port
   alternatif 18080/18000; `muara-bi-core:dev` + `muara-bi-web:dev` ter-smoke-test, federated query
   Postgres+MongoDB, cache/RLS, budget Redis + bobot Asynq, dan dispatch alert sudah tervalidasi.
+
+### Kontrak pemotongan hasil query (M1.4, 2026-10-31)
+- **Kontrak engine baru** (`backend/engine/duckdb/types.go`): `Query(ctx, sql, QueryOptions{MaxRows, CappedSources}, args...)`
+  dan `QueryResult` kini membawa `RowLimit`, `Truncated`, `TruncatedBy` (`row_limit` | `source_cap`) + `CappedSources`.
+  `MaxRows` <= 0 berarti pakai cap platform `duckdb.DefaultMaxRows` (10.000) — angka yang sama yang dipakai guardrail.
+- **Cara deteksinya (bukan menebak "halaman penuh"):** statement dijalankan dengan `LIMIT cap+1` lewat
+  `PlanLimit()` di `guardrails.go`; kalau baris ke-(cap+1) benar-benar ada, hasilnya ditandai `row_limit` dan baris
+  penanda itu dibuang. 12 baris dengan cap 12 **tidak** ditandai (dibuktikan tes); cap 5 dari 12 ditandai.
+  `ApplyLimit()` tetap ada tapi sekarang hanya `PlanLimit(...).SQL`.
+- **Konsekuensi wajib bagi pemanggil:** web **tidak boleh lagi mem-pre-apply `ApplyLimit`** pada teks SQL.
+  `internal/service/session_preparer.go` sudah dibersihkan dari itu — SQL yang sudah memuat `LIMIT n` membuat
+  probe tidak pernah melihat baris ekstra, sehingga semua hasil tampak utuh. Cap diteruskan lewat `QueryOptions`.
+  `attachConnections`/`attachConnection` kini mengembalikan `([]string, error)` (daftar view yang ter-cap) supaya
+  sumber yang terpotong di sisi sumber ikut dilaporkan.
+- **Cap di sisi sumber ikut mengalir:** `StreamMongoCollections` mengembalikan `[]MongoMount{Collection, View,
+  Documents, Truncated}` dan `CappedMongoViews()` mengubahnya jadi `CappedSources`; batas `DefaultMongoDocLimit`
+  (10.000 dokumen/collection) dan `MaxMongoCollections` (32, gagal total bukan sebagian) tidak lagi bisa ditebak dari UI.
+  Precedence: `row_limit` > `source_cap`.
+- **Ke mana field-nya keluar:** `internal/dto/response/query.go` menambahkan keempat field itu (dengan komentar
+  bahwa engine yang memutuskan, UI hanya merender) dan dipetakan di `query_service.go:109` + `share_service.go:324`.
+  **UI frontend belum menampilkan penanda pemotongan** — itu disengaja, masuk M2 desktop/phase berikutnya.
+- **Gerbang verifikasi:** tes baru `engine/duckdb/truncation_test.go` (7 kasus: terpotong, utuh di bawah cap, pas
+  di cap, `LIMIT` penulis lebih ketat dari cap, default platform, `source_cap`, `row_limit` mengalahkan `source_cap`),
+  `TestPlanLimit` di `guardrails_test.go`, `TestCappedMongoViews` di `nosql_adapter_test.go`. Kedua modul hijau pada
+  `CGO_ENABLED=1` dan `=0`, `gofmt -l` bersih. Worker alert (`MaxRows: 1`) dan digest tetap berperilaku sama.
 
 ### Paket Docker (Phase 5.1) — fakta teknis yang sudah diverifikasi
 - **Kemasan DuckDB:** `go-duckdb v1.8.5` membundel `libduckdb.a` untuk `linux_amd64`/`linux_arm64` (glibc + libstdc++), DuckDB internal versi **v1.1.3**, dan **tidak** punya build tag `STATIC_EXTENSIONS`. Karena itu: runtime image `debian:bookworm-slim` (bukan Alpine/musl), dan ekstensi `postgres`/`mysql`/`sqlite` dipre-bundle ke `/opt/duckdb/extensions`.

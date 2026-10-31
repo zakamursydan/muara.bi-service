@@ -21,7 +21,7 @@ func TestEngine_WithoutCGORefuses(t *testing.T) {
 		t.Fatalf("disabled engine must not open sessions, got session=%v err=%v", session, err)
 	}
 
-	res, err := disabledSession{}.Query(context.Background(), "SELECT 1")
+	res, err := disabledSession{}.Query(context.Background(), "SELECT 1", QueryOptions{})
 	if !errors.Is(err, ErrCGODisabled) {
 		t.Fatalf("expected refusal from stub session, got res=%+v err=%v", res, err)
 	}

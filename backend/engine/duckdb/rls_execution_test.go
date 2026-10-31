@@ -50,8 +50,8 @@ func newGuardrailSession(t *testing.T) Session {
 	return session
 }
 
-// runGuardrailed mirrors SessionPreparer.Execute: validate, bind {{param}},
-// wrap with RLS continuing the parameter index, then apply the row limit.
+// runGuardrailed mirrors SessionPreparer.Execute: validate, bind {{param}}, wrap
+// with RLS continuing the parameter index, then let the session police the rows.
 func runGuardrailed(t *testing.T, session Session, rawSQL string, params map[string]any, rules []RLSRule, maxRows int) *QueryResult {
 	t.Helper()
 	ctx := context.Background()
@@ -71,9 +71,8 @@ func runGuardrailed(t *testing.T, session Session, rawSQL string, params map[str
 		t.Fatalf("apply rls: %v", err)
 	}
 	args = append(args, rlsArgs...)
-	sqlText = ApplyLimit(scopedSQL, maxRows)
 
-	res, err := session.Query(ctx, sqlText, args...)
+	res, err := session.Query(ctx, scopedSQL, QueryOptions{MaxRows: maxRows}, args...)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -167,7 +166,7 @@ func TestRLSColumnMustBeProjected(t *testing.T) {
 		t.Fatalf("apply rls: %v", err)
 	}
 
-	if _, err := session.Query(ctx, ApplyLimit(scopedSQL, 100), rlsArgs...); err == nil {
+	if _, err := session.Query(ctx, scopedSQL, QueryOptions{MaxRows: 100}, rlsArgs...); err == nil {
 		t.Fatal("expected the query to fail when the guarded column is not projected")
 	}
 }

@@ -30,7 +30,7 @@ func TestEngine_Lifecycle(t *testing.T) {
 	}
 
 	// Test querying registered JSON data
-	res, err := session.Query(ctx, "SELECT * FROM products")
+	res, err := session.Query(ctx, "SELECT * FROM products", QueryOptions{})
 	if err != nil {
 		t.Fatalf("failed to query session: %v", err)
 	}

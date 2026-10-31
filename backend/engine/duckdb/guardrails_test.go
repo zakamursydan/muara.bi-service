@@ -3,6 +3,7 @@ package duckdb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -73,6 +74,31 @@ func TestApplyLimit(t *testing.T) {
 	res5 := ApplyLimit("SELECT * FROM (SELECT id FROM t LIMIT 99999) s", 1000)
 	if !strings.HasSuffix(res5, "LIMIT 1000") {
 		t.Errorf("expected outer limit appended, got: %s", res5)
+	}
+}
+
+func TestPlanLimit(t *testing.T) {
+	// An author limit that already narrows the cap is neither rewritten nor
+	// counted as platform truncation.
+	narrow := PlanLimit("SELECT * FROM transactions LIMIT 50", 1000)
+	if narrow.SQL != "SELECT * FROM transactions LIMIT 50" || narrow.Limit != 50 || narrow.Injected {
+		t.Errorf("author limit kept: %+v", narrow)
+	}
+
+	widened := PlanLimit("SELECT * FROM transactions LIMIT 500000 OFFSET 10", 1000)
+	if widened.SQL != "SELECT * FROM transactions LIMIT 1000 OFFSET 10" || widened.Limit != 1000 || !widened.Injected {
+		t.Errorf("author limit clamped: %+v", widened)
+	}
+
+	appended := PlanLimit("SELECT * FROM transactions;", 1000)
+	if appended.SQL != "SELECT * FROM transactions LIMIT 1000" || appended.Limit != 1000 || !appended.Injected {
+		t.Errorf("limit appended and semicolon stripped: %+v", appended)
+	}
+
+	// Zero falls back to the platform default instead of running unbounded.
+	fallback := PlanLimit("SELECT 1", 0)
+	if !strings.HasSuffix(fallback.SQL, fmt.Sprintf("LIMIT %d", DefaultMaxRows)) || fallback.Limit != DefaultMaxRows {
+		t.Errorf("default cap applied: %+v", fallback)
 	}
 }
 

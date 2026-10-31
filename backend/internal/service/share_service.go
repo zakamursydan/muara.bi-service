@@ -317,12 +317,16 @@ func (s *ShareService) QueryPublicWidget(
 	}
 
 	return &response.ExecuteQueryResponse{
-		Columns:    result.Columns,
-		Rows:       result.Rows,
-		RowCount:   result.RowCount,
-		DurationMs: result.DurationMs,
-		Cached:     false,
-		EnvTag:     share.EnvTag,
+		Columns:       result.Columns,
+		Rows:          result.Rows,
+		RowCount:      result.RowCount,
+		DurationMs:    result.DurationMs,
+		RowLimit:      result.RowLimit,
+		Truncated:     result.Truncated,
+		TruncatedBy:   result.TruncatedBy,
+		CappedSources: result.CappedSources,
+		Cached:        false,
+		EnvTag:        share.EnvTag,
 	}, nil
 }
 
