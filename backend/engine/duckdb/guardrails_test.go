@@ -130,6 +130,21 @@ func TestNormalizeMaxMemory(t *testing.T) {
 			t.Errorf("%q rejected: got %q, err=nil", bad, got)
 		}
 	}
+
+	// Zero matches the shape of a valid budget, so only a value check catches it.
+	// An unbounded session is exactly what the row cap and the budget exist to
+	// prevent, and a config error that survives to the first query is the failure
+	// mode M1.5 promised to remove.
+	for _, zero := range []string{"0", "0B", "0GB", "0GiB", "0.0GiB", "0MiB", " 0TiB "} {
+		got, err := NormalizeMaxMemory(zero)
+		if err == nil {
+			t.Errorf("%q accepted as %q; a zero budget must fail at startup", zero, got)
+			continue
+		}
+		if !errors.Is(err, ErrInvalidMemoryBudget) {
+			t.Errorf("%q rejected with the wrong error: %v", zero, err)
+		}
+	}
 }
 
 func TestTransformParameters(t *testing.T) {

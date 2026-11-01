@@ -29,7 +29,8 @@ x-core-env: &core-env
   # worker replicas. Raise DUCKDB_MAX_CONCURRENCY only with host memory to match.
   DUCKDB_MAX_CONCURRENCY: ${DUCKDB_MAX_CONCURRENCY:-2}
   # Memory budget of a single session (DuckDB applies it per in-memory database),
-  # so the ceiling is DUCKDB_MAX_CONCURRENCY x DUCKDB_MAX_MEMORY. Needs a unit;
+  # so the ceiling is DUCKDB_MAX_CONCURRENCY x DUCKDB_MAX_MEMORY. Needs a unit and
+  # a value above zero — both mistakes fail at startup;
   # GiB is binary, GB would quietly be 7% less. Past the budget DuckDB spills to
   # its temp directory instead of allocating, so a ceiling above the VM's RAM
   # slows queries down rather than OOM-killing them.

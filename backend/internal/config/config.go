@@ -31,7 +31,8 @@ type DuckDBConfig struct {
 	ExtensionDirectory string `env:"DUCKDB_EXTENSION_DIRECTORY" default:""`
 
 	// MaxMemory is the DuckDB memory budget of a single session, e.g. "2GiB".
-	// It must carry a unit; the engine rejects a bare number at startup.
+	// It must carry a unit and must be greater than zero; the engine rejects
+	// either mistake at startup.
 	MaxMemory string `env:"DUCKDB_MAX_MEMORY" default:"2GiB"`
 
 	// MaxConcurrentExecutions is how many DuckDB sessions may run at once across

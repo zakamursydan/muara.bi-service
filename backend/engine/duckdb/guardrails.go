@@ -54,11 +54,12 @@ const DefaultMaxRows = 10000
 // would silently mean 7% less than every label says.
 const DefaultMaxMemory = "2GiB"
 
-// maxMemoryPattern accepts a positive number with an explicit DuckDB unit. Both
-// size families DuckDB parses are allowed: KB/MB/GB/TB are 1000^i while
+// maxMemoryPattern accepts a number with an explicit DuckDB unit; the value
+// itself is checked separately because the pattern cannot express "not zero".
+// Both size families DuckDB parses are allowed: KB/MB/GB/TB are 1000^i while
 // KiB/MiB/GiB/TiB are 1024^i. A UI that labels its slider "GiB" can therefore
 // send that spelling through and have the setting mean exactly what it says.
-var maxMemoryPattern = regexp.MustCompile(`(?i)^\d+(\.\d+)?(B|KB|MB|GB|TB|KIB|MIB|GIB|TIB)$`)
+var maxMemoryPattern = regexp.MustCompile(`(?i)^(\d+(?:\.\d+)?)(B|KB|MB|GB|TB|KIB|MIB|GIB|TIB)$`)
 
 // NormalizeMaxMemory validates a DuckDB memory budget such as "2GiB" or "512MB"
 // and returns the default when empty. Units are mandatory: DuckDB itself refuses
@@ -66,13 +67,27 @@ var maxMemoryPattern = regexp.MustCompile(`(?i)^\d+(\.\d+)?(B|KB|MB|GB|TB|KIB|MI
 // only defer the failure to the first session. Spaces are rejected too, even
 // though DuckDB tolerates "2 GB", because config strings like
 // DUCKDB_MAX_MEMORY=2 GB are ambiguous at read time.
+//
+// A zero budget is rejected on shape *and* value. The pattern happily matches
+// "0GiB", but a session that may allocate nothing is a misconfiguration either
+// way: if DuckDB refuses it the failure lands at the first query instead of at
+// startup, and if it treats 0 like the unlimited it already gives to "-1" then
+// every guardrail built on the budget quietly stops applying.
 func NormalizeMaxMemory(raw string) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return DefaultMaxMemory, nil
 	}
-	if !maxMemoryPattern.MatchString(trimmed) {
+	match := maxMemoryPattern.FindStringSubmatch(trimmed)
+	if match == nil {
 		return "", fmt.Errorf("%w: %q (want a number followed by B, KB, MB, GB, TB, KiB, MiB, GiB or TiB)", ErrInvalidMemoryBudget, trimmed)
+	}
+	value, err := strconv.ParseFloat(match[1], 64)
+	if err != nil {
+		return "", fmt.Errorf("%w: %q is not a number", ErrInvalidMemoryBudget, trimmed)
+	}
+	if value == 0 {
+		return "", fmt.Errorf("%w: %q is zero; a memory budget must be greater than 0", ErrInvalidMemoryBudget, trimmed)
 	}
 	return trimmed, nil
 }

@@ -91,6 +91,11 @@ func TestEngineRejectsUnusableMemoryBudget(t *testing.T) {
 	if _, err := NewEngine(GuardrailConfig{MaxMemory: "2048"}); err == nil {
 		t.Fatal("a bare number must fail at startup, not silently mean 2048 bytes")
 	}
+	// DUCKDB_MAX_MEMORY=0GiB used to pass validation and reach DuckDB; the point of
+	// checking the value is that the operator learns about it here.
+	if _, err := NewEngine(GuardrailConfig{MaxMemory: "0GiB"}); err == nil {
+		t.Fatal("a zero budget must fail at startup, not disable the memory guardrail")
+	}
 }
 
 // An extension directory is how a desktop bundle promises that its connectors

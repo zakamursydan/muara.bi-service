@@ -51,7 +51,8 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   (`KiB|MiB|GiB|TiB`), **default `DUCKDB_MAX_MEMORY` pindah ke `2GiB`** (keputusan user, konsisten dengan
   desktop), tiga catatan M1.5 yang salah dikoreksi, dan **bundel extension akhirnya menegakkan offline** —
   `INSTALL` dilompati dan autoinstall di-set `false` saat `ExtensionDirectory` terisi, karena spike M0
-  membuktikan DuckDB sebelumnya mengunduh connector ke folder "bundle" (blok di §3).
+  membuktikan DuckDB sebelumnya mengunduh connector ke folder "bundle" (blok di §3), dan **`0GiB` kini
+  ditolak** karena validator hanya memeriksa bentuk, bukan nilai (blok Budget nol).
 - **Kondisi Backend Terakhir yang Terverifikasi:**
   - Public Sharing & Signed JWT Embed teruji & terpasang.
   - Scheduled Digest & Threshold Alerts Dispatcher teruji & terhubung ke Asynq scheduler.
@@ -246,7 +247,34 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   dalam 0,02 dtk (bukti gagal cepat, bukan fetch yang menunggu timeout). `gofmt -l` bersih; engine dan web
   hijau pada `CGO_ENABLED=1` dan `=0`.
 
+### Budget `max_memory` bernilai nol ditolak di startup (2026-11-01, ditemukan oleh spike desktop M0)
+- **Gejalanya:** `DUCKDB_MAX_MEMORY=0GiB` **lolos** validasi M1.5. `maxMemoryPattern` lama
+  (`^\d+(\.\d+)?(unit)$`) hanya memeriksa **bentuk**, dan `NormalizeMaxMemory` langsung mengembalikan string
+  begitu bentuknya cocok — padahal kontrak butir itu persis "config salah gagal di startup".
+- **Kenapa nol berbahaya, dua-duanya salah:** kalau DuckDB menolaknya, kegagalan bergeser ke sesi pertama
+  (jauh dari tempat operator membaca log konfigurasi); kalau DuckDB memperlakukannya seperti `-1`
+  (unlimited — dan `-1` sudah kita ketahui diterima DuckDB, dicetak sebagai `16383.9 PiB`), maka
+  **seluruh guardrail yang dibangun di atas budget berhenti berlaku** tanpa satu pun pesan error. Engine
+  sudah sengaja menolak `-1` karena "unbounded read" bukan konfigurasi yang diizinkan, jadi `0` harus
+  diperlakukan sama.
+- **Perbaikannya** ([backend/engine/duckdb/guardrails.go](backend/engine/duckdb/guardrails.go)): group
+  pertama pola sekarang tertangkap (`^(\d+(?:\.\d+)?)(unit)$`), `NormalizeMaxMemory` mem-parse angkanya dan
+  menolak `0`/`0.0` dengan `ErrInvalidMemoryBudget` — tetap satu titik validasi, tetap `errors.Is` yang sama,
+  jadi tidak ada API baru dan tidak ada perubahan untuk nilai sah (`0.5GB` tetap diterima = 512 MB).
+  Cek nilai ini juga mencakup string berspasi (`" 0TiB "`): `TrimSpace` terjadi lebih dulu, jadi spasi tidak
+  membuat nol lolos.
+- **Yang tidak diubah:** perilaku DuckDB untuk `0GiB` **tidak di-probe** — tidak perlu, karena engine
+  memutuskan untuk tidak menerimanya sebelum menyentuh DuckDB. Angka `min(4GiB, RAM/4)` di desktop juga
+  tidak pernah menghasilkan nol (`meminfo.Budget` dijepit ≥256 MiB), tapi web membaca env apa adanya sehingga
+  yang harus menutup celah adalah engine.
+- **Gerbang verifikasi:** `TestNormalizeMaxMemory` (tujuh bentuk nol, termasuk `0B`/`0.0GiB`/berspasi, dan
+  menuntut `errors.Is(err, ErrInvalidMemoryBudget)`) + `TestEngineRejectsUnusableMemoryBudget` menambah kasus
+  `NewEngine(GuardrailConfig{MaxMemory: "0GiB"})` gagal. Suite engine hijau di `CGO_ENABLED=1` **dan** `=0`,
+  `gofmt -l` bersih, dan suite desktop (yang memanggil `NormalizeMaxMemory` untuk setiap keluaran
+  `meminfo.Budget`) tetap hijau.
+
 ### Paket Docker (Phase 5.1) — fakta teknis yang sudah diverifikasi
+
 - **Kemasan DuckDB:** `go-duckdb v1.8.5` membundel `libduckdb.a` untuk `linux_amd64`/`linux_arm64` (glibc + libstdc++), DuckDB internal versi **v1.1.3**, dan **tidak** punya build tag `STATIC_EXTENSIONS`. Karena itu: runtime image `debian:bookworm-slim` (bukan Alpine/musl), dan ekstensi `postgres`/`mysql`/`sqlite` dipre-bundle ke `/opt/duckdb/extensions`.
 - **`cmd/duckdb-bundle`** menjalankan `INSTALL`+`LOAD` lewat DuckDB itu sendiri (bukan URL curl yang di-hardcode) sehingga subdirektori `<versi>/<platform>` dipilihkan oleh mesin; teruji di host: menghasilkan `v1.1.3/osx_arm64/{postgres,mysql,sqlite}_scanner.duckdb_extension` dan mode `-install=false` memuatnya kembali tanpa network. Nama `postgres` di 1.1.3 otomatis di-alias ke `postgres_scanner`.
 - **`DUCKDB_EXTENSION_DIRECTORY`** → `GuardrailConfig.ExtensionDirectory` → `SET extension_directory` setiap sesi. `loadExtension` **menggagalkan permintaan** bila `LOAD` gagal — sebelumnya error ditelan dan muncul sebagai "Catalog Error" jauh di hilir. Sejak 2026-11-01, selama direktori bundle terisi: `INSTALL` **dilompati** dan `autoinstall_known_extensions`/`autoload_known_extensions` di-set `false` (lihat bagian "Bundel extension" di bawah). Tanpa konfigurasi bundle, `INSTALL` tetap best effort seperti sebelumnya.
