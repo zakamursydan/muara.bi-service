@@ -103,7 +103,7 @@ func TestPlanLimit(t *testing.T) {
 }
 
 func TestNormalizeMaxMemory(t *testing.T) {
-	for _, ok := range []string{"2GB", "512MB", "8b", "0.5GB"} {
+	for _, ok := range []string{"2GB", "512MB", "8b", "0.5GB", "2GiB", "512MiB"} {
 		got, err := NormalizeMaxMemory(ok)
 		if err != nil {
 			t.Errorf("%q accepted: %v", ok, err)
@@ -118,9 +118,9 @@ func TestNormalizeMaxMemory(t *testing.T) {
 		t.Errorf("empty falls back to default: %q err=%v", got, err)
 	}
 
-	// A bare number is DuckDB bytes, so "2048" meant as 2GB would starve every
-	// query; it has to fail at startup instead.
-	for _, bad := range []string{"2048", "2 GB", "large", "2GiB", "-2GB", "2GB; DROP TABLE t"} {
+	// DuckDB rejects a bare number itself ("Unknown unit for memory_limit"), and
+	// "-1" means unlimited — both must fail here rather than at first use.
+	for _, bad := range []string{"2048", "2 GB", "large", "-2GB", "-1", "2GB; DROP TABLE t"} {
 		if got, err := NormalizeMaxMemory(bad); err == nil {
 			t.Errorf("%q rejected: got %q, err=nil", bad, got)
 		}

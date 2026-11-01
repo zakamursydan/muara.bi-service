@@ -40,36 +40,49 @@ func TestEngine_WithCGOAnswers(t *testing.T) {
 }
 
 // The memory budget has to reach DuckDB, otherwise a deployment that lowers it
-// still OOMs the container at the old hardcoded 2GB.
+// still OOMs the container at the old hardcoded 2GB. Both size families are
+// asserted because a settings UI that labels its slider "GiB" must land on an
+// exact 1024^i budget, while the decimal "GB" spelling means less than it says.
 func TestEngineAppliesConfiguredMemoryBudget(t *testing.T) {
-	engine, err := NewEngine(GuardrailConfig{MaxMemory: "256MB", StatementTimeout: 5 * time.Second})
-	if err != nil {
-		t.Fatalf("new engine: %v", err)
+	cases := []struct {
+		budget string
+		want   int64
+	}{
+		{"256MB", 256_000_000},
+		{"2GiB", 2 << 30},
 	}
-	defer engine.Close()
 
-	ctx := context.Background()
-	session, err := engine.NewSession(ctx)
-	if err != nil {
-		t.Fatalf("new session: %v", err)
-	}
-	defer session.Close()
+	for _, tc := range cases {
+		t.Run(tc.budget, func(t *testing.T) {
+			engine, err := NewEngine(GuardrailConfig{MaxMemory: tc.budget, StatementTimeout: 5 * time.Second})
+			if err != nil {
+				t.Fatalf("new engine: %v", err)
+			}
+			defer engine.Close()
 
-	res, err := session.Query(ctx, "SELECT current_setting('max_memory') AS budget", QueryOptions{})
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	got, _ := res.Rows[0]["budget"].(string)
+			ctx := context.Background()
+			session, err := engine.NewSession(ctx)
+			if err != nil {
+				t.Fatalf("new session: %v", err)
+			}
+			defer session.Close()
 
-	// DuckDB reads "256MB" as 256 million bytes but prints the setting in MiB, so
-	// the budget is compared in bytes instead of by string.
-	reported, err := parseDuckSize(got)
-	if err != nil {
-		t.Fatalf("duckdb reports %q: %v", got, err)
-	}
-	const want = int64(256_000_000)
-	if diff := reported - want; diff < -want/100 || diff > want/100 {
-		t.Fatalf("256MB budget is not in effect: duckdb reports %q = %d bytes", got, reported)
+			res, err := session.Query(ctx, "SELECT current_setting('max_memory') AS budget", QueryOptions{})
+			if err != nil {
+				t.Fatalf("query: %v", err)
+			}
+			got, _ := res.Rows[0]["budget"].(string)
+
+			// DuckDB prints the setting in binary units no matter how it was set,
+			// so the budget is compared in bytes instead of by string.
+			reported, err := parseDuckSize(got)
+			if err != nil {
+				t.Fatalf("duckdb reports %q: %v", got, err)
+			}
+			if diff := reported - tc.want; diff < -tc.want/100 || diff > tc.want/100 {
+				t.Fatalf("%s budget is not in effect: duckdb reports %q = %d bytes, want %d", tc.budget, got, reported, tc.want)
+			}
+		})
 	}
 }
 

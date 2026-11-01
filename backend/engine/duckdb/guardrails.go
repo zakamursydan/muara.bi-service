@@ -50,22 +50,29 @@ const DefaultMaxRows = 10000
 // DefaultMaxMemory is the per-session DuckDB memory budget used when the
 // deployment does not configure one. Sessions are per query, so this is not the
 // process total: DUCKDB_MAX_CONCURRENCY sessions may each hold this much.
+// "2GB" is decimal — DuckDB reads it as 1.86 GiB, so a machine budget must be
+// computed from the same string, never from the unit's name.
 const DefaultMaxMemory = "2GB"
 
-// maxMemoryPattern accepts a positive number with an explicit DuckDB unit.
-var maxMemoryPattern = regexp.MustCompile(`(?i)^\d+(\.\d+)?(B|KB|MB|GB|TB)$`)
+// maxMemoryPattern accepts a positive number with an explicit DuckDB unit. Both
+// size families DuckDB parses are allowed: KB/MB/GB/TB are 1000^i while
+// KiB/MiB/GiB/TiB are 1024^i. A UI that labels its slider "GiB" can therefore
+// send that spelling through and have the setting mean exactly what it says.
+var maxMemoryPattern = regexp.MustCompile(`(?i)^\d+(\.\d+)?(B|KB|MB|GB|TB|KIB|MIB|GIB|TIB)$`)
 
-// NormalizeMaxMemory validates a DuckDB memory budget such as "2GB" or "512MB"
-// and returns the default when empty. A bare number is rejected on purpose:
-// DuckDB reads "2048" as bytes, so a typo meant as 2GB would silently starve
-// every query instead of failing at startup.
+// NormalizeMaxMemory validates a DuckDB memory budget such as "2GB" or "512MiB"
+// and returns the default when empty. Units are mandatory: DuckDB itself refuses
+// a bare number ("Unknown unit for memory_limit"), so accepting one here would
+// only defer the failure to the first session. Spaces are rejected too, even
+// though DuckDB tolerates "2 GB", because config strings like
+// DUCKDB_MAX_MEMORY=2 GB are ambiguous at read time.
 func NormalizeMaxMemory(raw string) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return DefaultMaxMemory, nil
 	}
 	if !maxMemoryPattern.MatchString(trimmed) {
-		return "", fmt.Errorf("%w: %q (want a number followed by B, KB, MB, GB or TB)", ErrInvalidMemoryBudget, trimmed)
+		return "", fmt.Errorf("%w: %q (want a number followed by B, KB, MB, GB, TB, KiB, MiB, GiB or TiB)", ErrInvalidMemoryBudget, trimmed)
 	}
 	return trimmed, nil
 }
@@ -74,8 +81,8 @@ func NormalizeMaxMemory(raw string) (string, error) {
 type GuardrailConfig struct {
 	MaxRows          int           `json:"max_rows"`
 	StatementTimeout time.Duration `json:"statement_timeout"`
-	// MaxMemory is the DuckDB per-session memory budget, e.g. "2GB". Empty keeps
-	// DefaultMaxMemory.
+	// MaxMemory is the DuckDB per-session memory budget, e.g. "2GB" (decimal) or
+	// "2GiB" (binary). Empty keeps DefaultMaxMemory.
 	MaxMemory string `json:"max_memory"`
 	// ExtensionDirectory is where DuckDB looks for already-installed extensions.
 	// Empty keeps DuckDB's default (the user home directory).
