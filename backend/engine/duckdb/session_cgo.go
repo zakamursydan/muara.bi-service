@@ -56,6 +56,9 @@ type cgoSession struct {
 	db               *sql.DB
 	tempFiles        []string
 	statementTimeout time.Duration
+	// bundledExtensions is true when the operator pointed the session at a
+	// directory of pre-shipped extension files.
+	bundledExtensions bool
 }
 
 func (e *cgoEngine) NewSession(ctx context.Context) (Session, error) {
@@ -71,8 +74,15 @@ func (e *cgoEngine) NewSession(ctx context.Context) (Session, error) {
 		fmt.Sprintf("SET threads=%d", e.threads),
 	}
 	if e.extensionDirectory != "" {
+		// A configured bundle is a promise that nothing has to be downloaded.
+		// Without these two settings DuckDB quietly reaches for
+		// extensions.duckdb.org, so an offline machine stalls until the fetch
+		// times out instead of reporting the missing connector.
 		initStatements = append(initStatements,
-			"SET extension_directory="+quoteLiteral(e.extensionDirectory))
+			"SET extension_directory="+quoteLiteral(e.extensionDirectory),
+			"SET autoinstall_known_extensions=false",
+			"SET autoload_known_extensions=false",
+		)
 	}
 
 	for _, stmt := range initStatements {
@@ -83,16 +93,23 @@ func (e *cgoEngine) NewSession(ctx context.Context) (Session, error) {
 	}
 
 	return &cgoSession{
-		db:               db,
-		statementTimeout: e.statementTimeout,
+		db:                db,
+		statementTimeout:  e.statementTimeout,
+		bundledExtensions: e.extensionDirectory != "",
 	}, nil
 }
 
-// loadExtension makes a connector available for ATTACH. The production image
-// ships pre-bundled extensions, so INSTALL is best effort, but a failed LOAD is
-// reported: swallowing it used to surface as a confusing "Catalog Error" later.
+// loadExtension makes a connector available for ATTACH. When the operator
+// configured an extension directory, the file is expected to already be there:
+// INSTALL is skipped entirely, because it reaches for extensions.duckdb.org
+// even with autoinstall disabled, and an offline machine would stall on the
+// fetch instead of reporting the missing connector. Without a bundle INSTALL
+// stays best effort, and only a failed LOAD is reported — swallowing it used to
+// surface as a confusing "Catalog Error" later.
 func (s *cgoSession) loadExtension(ctx context.Context, name string) error {
-	_, _ = s.db.ExecContext(ctx, "INSTALL "+name)
+	if !s.bundledExtensions {
+		_, _ = s.db.ExecContext(ctx, "INSTALL "+name)
+	}
 	if _, err := s.db.ExecContext(ctx, "LOAD "+name); err != nil {
 		return fmt.Errorf("duckdb extension %q is unavailable: %w", name, err)
 	}

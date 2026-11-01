@@ -39,15 +39,19 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
 
 - **Update Terakhir:** 2026-11-01
 - **Fase Selesai:** Phase 1, Phase 2, Phase 3 (100% Backend Complete), Phase 4 (100% Frontend) & Phase 5 (E2E Integration, Docker Packaging & Testing), plus refactor lintas-produk **M1** (2026-10-31)
-- **Fase Aktif:** tidak ada di repo ini sampai spike **M0 desktop** dimulai (lihat `muara.bi-desktop/PLAN.md`) — engine analitik sudah keluar `internal/` dan dipakai ulang oleh muara.bi Desktop tanpa salinan kedua. Phase 1–5 tetap `[x]`.
+- **Fase Aktif:** spike **M0 desktop** berjalan (di `muara.bi-desktop/`, lihat PLAN.md di repo itu) — engine
+  analitik sudah keluar `internal/`, sekarang benar-benar dikonsumsi dari **modul kedua**, dan Perubahan
+  engine tetap harus hijau di dua konsumen. Phase 1–5 tetap `[x]`.
 - **Subtask Saat Ini:** **M1 selesai 2026-10-31.** M1.1–M1.5 tuntas, plus bug DSN Postgres lama (`sslmode`
   ganda) ditutup dan `ssl_mode` kini divalidasi (400, bukan gagal koneksi); exit criterion terakhir dibuktikan
   `make image-core` (blok M1.3 di bawah). Langkah berikutnya bukan di repo ini: spike **M0 desktop**
   (Wails v3 × CGO × offline di tiga OS). Yang masih menggantung di web: uji HTTP validasi `ssl_mode` (butuh
   `muara_api` dibangun ulang — infra milik user) dan `rootcert`/CA privat (blocker 8 BRD desktop).
-  Update 2026-11-01 di repo ini hanya soal memori: `NormalizeMaxMemory` kini menerima unit biner DuckDB
+  Update 2026-11-01 di repo ini: `NormalizeMaxMemory` kini menerima unit biner DuckDB
   (`KiB|MiB|GiB|TiB`), **default `DUCKDB_MAX_MEMORY` pindah ke `2GiB`** (keputusan user, konsisten dengan
-  desktop), dan tiga catatan M1.5 yang salah dikoreksi — lihat blok M1.5 di §3.
+  desktop), tiga catatan M1.5 yang salah dikoreksi, dan **bundel extension akhirnya menegakkan offline** —
+  `INSTALL` dilompati dan autoinstall di-set `false` saat `ExtensionDirectory` terisi, karena spike M0
+  membuktikan DuckDB sebelumnya mengunduh connector ke folder "bundle" (blok di §3).
 - **Kondisi Backend Terakhir yang Terverifikasi:**
   - Public Sharing & Signed JWT Embed teruji & terpasang.
   - Scheduled Digest & Threshold Alerts Dispatcher teruji & terhubung ke Asynq scheduler.
@@ -221,10 +225,31 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   jadi validasi ini masih terbukti di level unit saja. Image `muara-bi-core:dev` build 2026-10-31 sudah
   berisi kode ini, jadi tinggal `docker compose up --build api`.
 
+### Bundel extension DuckDB ditegakkan offline (2026-11-01, ditemukan oleh spike desktop M0)
+- **Gejalanya:** dengan `DUCKDB_EXTENSION_DIRECTORY` menunjuk folder **kosong**, `AttachPostgres` tetap
+  **berhasil** — DuckDB mengunduh `v1.1.3/osx_arm64/postgres_scanner.duckdb_extension` ke folder yang
+  dijanjikan sebagai bawaan aplikasi. Artinya "image hanya-read" dan "desktop offline" sama-sama tidak
+  ditegakkan oleh kode: di mesin online bundel diam-diam terisi dari jaringan, di mesin offline permintaan
+  menggantung sampai fetch timeout alih-alih melaporkan connector yang hilang.
+- **Dua penyebab, keduanya di engine:** `autoinstall_known_extensions`/`autoload_known_extensions` default
+  `true`, dan `loadExtension` selalu mengirim `INSTALL` tanpa peduli ada bundle atau tidak.
+- **Perbaikannya** ([backend/engine/duckdb/session_cgo.go](backend/engine/duckdb/session_cgo.go)): kalau
+  `ExtensionDirectory` terisi, sesi meng-set kedua flag itu `false` dan `cgoSession.bundledExtensions`
+  membuat `INSTALL` dilompati, sehingga hanya berkas di folder aplikasi yang bisa dimuat. Tanpa
+  `ExtensionDirectory` (dev web) perilaku lama tetap: autoinstall aktif dan `INSTALL` best effort — tidak
+  ada regresi, terbukti dari spike yang tetap berhasil attach saat `-extension-directory` tidak diisi.
+- **Kenapa ini penting untuk dua produk:** desktop berjanji jalan tanpa internet (BRD desktop §4 FR-2), dan
+  web berjanji image-nya tidak perlu menghubungi `extensions.duckdb.org` saat runtime. Keduanya sekarang
+  ditegakkan oleh engine, bukan oleh asumsi isi Dockerfile.
+- **Gerbang verifikasi:** `TestBundledExtensionDirectoryStaysOffline` (CGO) — attach terhadap bundle kosong
+  harus gagal dengan pesan `unavailable` **dan** folder harus tetap kosong, tanpa butuh jaringan; lolos
+  dalam 0,02 dtk (bukti gagal cepat, bukan fetch yang menunggu timeout). `gofmt -l` bersih; engine dan web
+  hijau pada `CGO_ENABLED=1` dan `=0`.
+
 ### Paket Docker (Phase 5.1) — fakta teknis yang sudah diverifikasi
 - **Kemasan DuckDB:** `go-duckdb v1.8.5` membundel `libduckdb.a` untuk `linux_amd64`/`linux_arm64` (glibc + libstdc++), DuckDB internal versi **v1.1.3**, dan **tidak** punya build tag `STATIC_EXTENSIONS`. Karena itu: runtime image `debian:bookworm-slim` (bukan Alpine/musl), dan ekstensi `postgres`/`mysql`/`sqlite` dipre-bundle ke `/opt/duckdb/extensions`.
 - **`cmd/duckdb-bundle`** menjalankan `INSTALL`+`LOAD` lewat DuckDB itu sendiri (bukan URL curl yang di-hardcode) sehingga subdirektori `<versi>/<platform>` dipilihkan oleh mesin; teruji di host: menghasilkan `v1.1.3/osx_arm64/{postgres,mysql,sqlite}_scanner.duckdb_extension` dan mode `-install=false` memuatnya kembali tanpa network. Nama `postgres` di 1.1.3 otomatis di-alias ke `postgres_scanner`.
-- **`DUCKDB_EXTENSION_DIRECTORY`** → `GuardrailConfig.ExtensionDirectory` → `SET extension_directory` setiap sesi. `loadExtension` membiarkan `INSTALL` gagal (image hanya-read) tapi **menggagalkan permintaan** bila `LOAD` gagal — sebelumnya error ditelan dan muncul sebagai "Catalog Error" jauh di hilir.
+- **`DUCKDB_EXTENSION_DIRECTORY`** → `GuardrailConfig.ExtensionDirectory` → `SET extension_directory` setiap sesi. `loadExtension` **menggagalkan permintaan** bila `LOAD` gagal — sebelumnya error ditelan dan muncul sebagai "Catalog Error" jauh di hilir. Sejak 2026-11-01, selama direktori bundle terisi: `INSTALL` **dilompati** dan `autoinstall_known_extensions`/`autoload_known_extensions` di-set `false` (lihat bagian "Bundel extension" di bawah). Tanpa konfigurasi bundle, `INSTALL` tetap best effort seperti sebelumnya.
 - **Migrasi goose kini `//go:embed`** (`internal/generated/embed.go`, `goose.SetBaseFS` + `goose.Up(db, "migrations")`): sebelumnya dibaca dari path relatif `./internal/generated/migrations`, sehingga biner di container (WORKDIR `/app`) tidak bisa bermigrasi. Terverifikasi: `goose: no migrations to run. current version: 2` pada DB yang sudah bermigrasi.
 - **Linking:** `-extldflags=-Wl,-E` dibutuhkan agar ekstensi yang di-`dlopen` bisa melihat simbol DuckDB dari biner yang di-link statis.
 - **Compose:** `api` (healthcheck `/health`) → `worker` (override `command`, healthcheck `disable`) → `web` (`API_BASE_URL=http://api:8080`, proxy `/api/*`). Kredensial nyata (`APP_SECRET_KEY`, `APP_ENCRYPTION_MASTER_KEY`, `DB_PASSWORD`) di-guard `:?` supaya compose gagal cepat alih-alih memakai default yang ada di repo publik. `DB_PUBLISH_PORT` memisahkan port host dari port internal `DB_PORT=5432`.

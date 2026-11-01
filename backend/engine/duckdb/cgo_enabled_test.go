@@ -5,6 +5,7 @@ package duckdb
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -89,6 +90,48 @@ func TestEngineAppliesConfiguredMemoryBudget(t *testing.T) {
 func TestEngineRejectsUnusableMemoryBudget(t *testing.T) {
 	if _, err := NewEngine(GuardrailConfig{MaxMemory: "2048"}); err == nil {
 		t.Fatal("a bare number must fail at startup, not silently mean 2048 bytes")
+	}
+}
+
+// An extension directory is how a desktop bundle promises that its connectors
+// ship with the app. DuckDB used to break that promise quietly: with autoinstall
+// on and INSTALL still issued, a machine with no network stalled until the fetch
+// timed out, and an online one downloaded into the "bundled" folder instead of
+// reporting the missing connector. So: a configured bundle that lacks the file
+// must fail fast and leave the directory empty.
+func TestBundledExtensionDirectoryStaysOffline(t *testing.T) {
+	bundle := t.TempDir()
+	engine, err := NewEngine(GuardrailConfig{
+		MaxMemory:          "256MB",
+		StatementTimeout:   5 * time.Second,
+		ExtensionDirectory: bundle,
+	})
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+	session, err := engine.NewSession(ctx)
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer session.Close()
+
+	err = session.AttachPostgres(ctx, "sample", "host=127.0.0.1 port=1 user=nobody dbname=none")
+	if err == nil {
+		t.Fatal("attach succeeded, so the connector came from somewhere other than the bundle")
+	}
+	if !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("want the missing-connector message, got %v", err)
+	}
+
+	entries, err := os.ReadDir(bundle)
+	if err != nil {
+		t.Fatalf("read bundle dir: %v", err)
+	}
+	if len(entries) > 0 {
+		t.Fatalf("a bundle miss must not download anything, but %q now holds %d entries", bundle, len(entries))
 	}
 }
 
