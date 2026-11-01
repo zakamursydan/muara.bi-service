@@ -45,8 +45,9 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   `make image-core` (blok M1.3 di bawah). Langkah berikutnya bukan di repo ini: spike **M0 desktop**
   (Wails v3 × CGO × offline di tiga OS). Yang masih menggantung di web: uji HTTP validasi `ssl_mode` (butuh
   `muara_api` dibangun ulang — infra milik user) dan `rootcert`/CA privat (blocker 8 BRD desktop).
-  Update 2026-11-01 di repo ini hanya satu hal: `NormalizeMaxMemory` kini menerima unit biner DuckDB
-  (`KiB|MiB|GiB|TiB`) dan tiga catatan M1.5 yang salah dikoreksi — lihat blok M1.5 di §3.
+  Update 2026-11-01 di repo ini hanya soal memori: `NormalizeMaxMemory` kini menerima unit biner DuckDB
+  (`KiB|MiB|GiB|TiB`), **default `DUCKDB_MAX_MEMORY` pindah ke `2GiB`** (keputusan user, konsisten dengan
+  desktop), dan tiga catatan M1.5 yang salah dikoreksi — lihat blok M1.5 di §3.
 - **Kondisi Backend Terakhir yang Terverifikasi:**
   - Public Sharing & Signed JWT Embed teruji & terpasang.
   - Scheduled Digest & Threshold Alerts Dispatcher teruji & terhubung ke Asynq scheduler.
@@ -134,18 +135,23 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   `CGO_ENABLED=1` dan `=0`, `gofmt -l` bersih. Worker alert (`MaxRows: 1`) dan digest tetap berperilaku sama.
 
 ### Batas memori DuckDB jadi konfigurasi (M1.5, 2026-10-31)
-- **Yang berubah:** `GuardrailConfig.MaxMemory string` (default `duckdb.DefaultMaxMemory` = `"2GB"`, sama seperti
-  angka yang sebelumnya di-hardcode) dan `NewEngine` sekarang memvalidasi nilainya — konfigurasi salah **gagal di
-  startup**, bukan diam-diam memakai budget lama. Web mengambilnya dari `config.DuckDBConfig.MaxMemory`
-  (`DUCKDB_MAX_MEMORY`, default `2GB`) yang disalin di `internal/app/server/service.go:59`, diteruskan ke
-  `SET max_memory=` setiap sesi lewat `quoteLiteral`. Desktop nanti memakai field yang sama dari profilnya sendiri.
+- **Yang berubah:** `GuardrailConfig.MaxMemory string` (saat M1.5 ditutup nilainya `"2GB"`, sama seperti angka
+  yang sebelumnya di-hardcode; **sejak 2026-11-01 default-nya `"2GiB"`** — keputusan user supaya kedua produk
+  memakai angka yang sama dan labelnya tidak bohong) dan `NewEngine` sekarang memvalidasi nilainya — konfigurasi
+  salah **gagal di startup**, bukan diam-diam memakai budget lama. Web mengambilnya dari
+  `config.DuckDBConfig.MaxMemory` (`DUCKDB_MAX_MEMORY`, default `2GiB`) yang disalin di
+  `internal/app/server/service.go:59`, diteruskan ke `SET max_memory=` setiap sesi lewat `quoteLiteral`.
+  Desktop memakai field yang sama dari profilnya sendiri.
 - **Kenapa angka polos ditolak:** `NormalizeMaxMemory` hanya menerima angka + unit dan mengembalikan default saat
   kosong; tesnya juga menolak injeksi seperti `"2GB; DROP TABLE t"`. Alasan lama ("DuckDB membaca `2048` sebagai
   byte") **tidak benar** — lihat koreksi 2026-11-01 di bawah; yang tersisa cuma alasan stilistis: gagal di startup
   dengan pesan jelas, bukan menyerahkan kesalahan itu ke parser DuckDB.
-- **Fakta DuckDB yang tercatat:** **puncak pemakaian = `DUCKDB_MAX_CONCURRENCY × DUCKDB_MAX_MEMORY`** — komentar
-  `.env.example` dan `docker-compose.yml` sudah menghitungnya begitu. Tes `TestEngineAppliesConfiguredMemoryBudget`
-  membandingkan **byte**, bukan string, supaya perbedaan unit ini tidak membuat tes rapuh.
+- **Fakta DuckDB yang tercatat:** **plafon pemakaian = `DUCKDB_MAX_CONCURRENCY × DUCKDB_MAX_MEMORY`** — komentar
+  `.env.example` dan `docker-compose.yml` sudah menghitungnya begitu. Ini **plafon, bukan alokasi**: begitu
+  sebuah sesi melewatinya DuckDB menuliskan hasilnya ke `temp_directory` (spill) alih-alih menaikkan RSS, jadi
+  plafon yang lebih besar dari RAM container memperlambat query, bukan langsung OOM. Tes
+  `TestEngineAppliesConfiguredMemoryBudget` membandingkan **byte**, bukan string, supaya perbedaan unit ini
+  tidak membuat tes rapuh.
 - **Koreksi + kapasitas baru (2026-11-01, hasil probe langsung ke DuckDB).** Empat hal yang sebelumnya salah catat,
   dibuktikan dengan `SET max_memory=` lalu `current_setting('max_memory')` pada sesi in-memory:
   1. **DuckDB menerima unit biner** `KiB|MiB|GiB|TiB` di samping `KB|MB|GB|TB` desimal — pesan errornya sendiri
@@ -157,14 +163,22 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   3. **`-1` berarti tanpa batas** dan diterima DuckDB (`current_setting` membalas `16383.9 PiB`); engine tetap
      menolaknya karena guardrail tidak boleh bisa dimatikan lewat konfigurasi.
   4. **Kalau tidak di-SET sama sekali, default DuckDB = 80% RAM fisik** (terukur `6.3 GiB` di host 8 GB). Ini angka
-     yang jadi pembanding saat desktop memilih default-nya: `2GB` kita lebih konservatif dari DuckDB, bukan agresif.
+     yang jadi pembanding saat desktop memilih default-nya: `2GiB` kita lebih konservatif dari DuckDB, bukan agresif.
      Catatan: `"2 GB"` (berspasi) diterima DuckDB tapi tetap ditolak engine — `DUCKDB_MAX_MEMORY=2 GB` di file env
      mudah salah baca, dan tes menolak `-2GB`/`0`/`NULL`/`auto`.
+  5. **Default web ikut `2GiB` atas keputusan user (2026-11-01)** — sebelumnya `2GB` desimal, yang berarti angka
+     di layar 7% lebih besar dari yang benar-benar dipakai. Efeknya ke `.env.example` + fallback
+     `docker-compose.yml` (dua-duanya tidak ditetapkan di `.env` milik user, jadi compose memang berubah untuk
+     stack lokal): plafon kini 2 × 2,15 GB = 4,29 GB di VM Docker 3,83 GiB. Itu tetap aman karena point 4 —
+     DuckDB spill ke disk, bukan alokasi paksa — tapi kalau query besar mulai terasa lambat karena spill,
+     yang diturunkan adalah `DUCKDB_MAX_MEMORY` atau `DUCKDB_MAX_CONCURRENCY`, bukan unitnya.
 - `threads` sengaja **masih** 2 per sesi (di luar M1.5): budget CPU per sesi baru masuk akal setelah desktop M0
   menentukan profil mesin; field-nya sudah ditandai di `session_cgo.go`.
-- **Gerbang verifikasi:** `TestNormalizeMaxMemory` (CGO-free) + `TestEngineAppliesConfiguredMemoryBudget` dan
-  `TestEngineRejectsUnusableMemoryBudget` (CGO) lolos; tes budget kini tabel dua kasus (`256MB` desimal, `2GiB`
-  biner). Kedua modul hijau pada `CGO_ENABLED=1` dan `=0`, `gofmt -l` bersih.
+- **Gerbang verifikasi:** `TestNormalizeMaxMemory` (CGO-free, termasuk satu tes yang mengunci
+  `DefaultMaxMemory == "2GiB"` supaya kedua produk tidak berpaling ke ejaan desimal diam-diam) +
+  `TestEngineAppliesConfiguredMemoryBudget` dan `TestEngineRejectsUnusableMemoryBudget` (CGO) lolos; tes budget
+  kini tabel dua kasus (`256MB` desimal, `2GiB` biner). Kedua modul hijau pada `CGO_ENABLED=1` dan `=0`,
+  `gofmt -l` bersih.
 
 ### Perbaikan DSN Postgres (2026-10-31, bug lama dari audit desktop)
 - **Gejalanya:** `SyncSchema` Postgres **selalu** gagal untuk koneksi yang disimpan tanpa `ssl_mode`.

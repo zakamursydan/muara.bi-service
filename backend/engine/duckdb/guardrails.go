@@ -50,9 +50,9 @@ const DefaultMaxRows = 10000
 // DefaultMaxMemory is the per-session DuckDB memory budget used when the
 // deployment does not configure one. Sessions are per query, so this is not the
 // process total: DUCKDB_MAX_CONCURRENCY sessions may each hold this much.
-// "2GB" is decimal — DuckDB reads it as 1.86 GiB, so a machine budget must be
-// computed from the same string, never from the unit's name.
-const DefaultMaxMemory = "2GB"
+// Spelled in binary units on purpose — DuckDB also parses decimal GB, which
+// would silently mean 7% less than every label says.
+const DefaultMaxMemory = "2GiB"
 
 // maxMemoryPattern accepts a positive number with an explicit DuckDB unit. Both
 // size families DuckDB parses are allowed: KB/MB/GB/TB are 1000^i while
@@ -60,7 +60,7 @@ const DefaultMaxMemory = "2GB"
 // send that spelling through and have the setting mean exactly what it says.
 var maxMemoryPattern = regexp.MustCompile(`(?i)^\d+(\.\d+)?(B|KB|MB|GB|TB|KIB|MIB|GIB|TIB)$`)
 
-// NormalizeMaxMemory validates a DuckDB memory budget such as "2GB" or "512MiB"
+// NormalizeMaxMemory validates a DuckDB memory budget such as "2GiB" or "512MB"
 // and returns the default when empty. Units are mandatory: DuckDB itself refuses
 // a bare number ("Unknown unit for memory_limit"), so accepting one here would
 // only defer the failure to the first session. Spaces are rejected too, even
@@ -81,8 +81,8 @@ func NormalizeMaxMemory(raw string) (string, error) {
 type GuardrailConfig struct {
 	MaxRows          int           `json:"max_rows"`
 	StatementTimeout time.Duration `json:"statement_timeout"`
-	// MaxMemory is the DuckDB per-session memory budget, e.g. "2GB" (decimal) or
-	// "2GiB" (binary). Empty keeps DefaultMaxMemory.
+	// MaxMemory is the DuckDB per-session memory budget, e.g. "2GiB" (binary) or
+	// "2GB" (decimal, 7% smaller than it reads). Empty keeps DefaultMaxMemory.
 	MaxMemory string `json:"max_memory"`
 	// ExtensionDirectory is where DuckDB looks for already-installed extensions.
 	// Empty keeps DuckDB's default (the user home directory).

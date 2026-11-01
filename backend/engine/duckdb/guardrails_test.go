@@ -117,6 +117,11 @@ func TestNormalizeMaxMemory(t *testing.T) {
 	if got, err := NormalizeMaxMemory("  "); err != nil || got != DefaultMaxMemory {
 		t.Errorf("empty falls back to default: %q err=%v", got, err)
 	}
+	// Both products ship this same default, and it is spelled in binary units so
+	// the number an operator reads is the number DuckDB reserves.
+	if DefaultMaxMemory != "2GiB" {
+		t.Errorf("DefaultMaxMemory = %q, want the binary spelling", DefaultMaxMemory)
+	}
 
 	// DuckDB rejects a bare number itself ("Unknown unit for memory_limit"), and
 	// "-1" means unlimited — both must fail here rather than at first use.

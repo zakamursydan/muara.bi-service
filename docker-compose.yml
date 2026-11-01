@@ -28,9 +28,12 @@ x-core-env: &core-env
   # DuckDB sessions are memory-bound, so one shared budget spans the API and all
   # worker replicas. Raise DUCKDB_MAX_CONCURRENCY only with host memory to match.
   DUCKDB_MAX_CONCURRENCY: ${DUCKDB_MAX_CONCURRENCY:-2}
-  # Memory budget of a single session (DuckDB reads this per in-memory database),
-  # so peak usage is DUCKDB_MAX_CONCURRENCY x DUCKDB_MAX_MEMORY. Needs a unit.
-  DUCKDB_MAX_MEMORY: ${DUCKDB_MAX_MEMORY:-2GB}
+  # Memory budget of a single session (DuckDB applies it per in-memory database),
+  # so the ceiling is DUCKDB_MAX_CONCURRENCY x DUCKDB_MAX_MEMORY. Needs a unit;
+  # GiB is binary, GB would quietly be 7% less. Past the budget DuckDB spills to
+  # its temp directory instead of allocating, so a ceiling above the VM's RAM
+  # slows queries down rather than OOM-killing them.
+  DUCKDB_MAX_MEMORY: ${DUCKDB_MAX_MEMORY:-2GiB}
   DUCKDB_SLOT_LEASE_SECONDS: ${DUCKDB_SLOT_LEASE_SECONDS:-120}
   DUCKDB_QUEUE_TIMEOUT_SECONDS: ${DUCKDB_QUEUE_TIMEOUT_SECONDS:-30}
   WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
