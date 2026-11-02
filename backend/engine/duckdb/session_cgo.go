@@ -27,12 +27,17 @@ func NewEngine(cfg GuardrailConfig) (Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	threads, err := cfg.threads()
+	if err != nil {
+		return nil, err
+	}
 	return &cgoEngine{
-		maxMemory: maxMemory,
-		threads:   2,
-		// threads is deliberately not configurable yet: the CPU budget per
-		// session only makes sense once desktop M0 fixes the machine profile.
-		statementTimeout:   cfg.StatementTimeout,
+		maxMemory:        maxMemory,
+		threads:          threads,
+		statementTimeout: cfg.StatementTimeout,
+		// Threads comes from the profile, not from the machine: a web pod sizes it
+		// as a share of the CPU budget it is given, a single-user desktop as most of
+		// its own cores. NormalizeThreads clamps either way.
 		extensionDirectory: cfg.ExtensionDirectory,
 	}, nil
 }

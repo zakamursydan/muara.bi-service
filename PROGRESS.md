@@ -46,8 +46,9 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   ganda) ditutup dan `ssl_mode` kini divalidasi (400, bukan gagal koneksi); exit criterion terakhir dibuktikan
   `make image-core` (blok M1.3 di bawah). Langkah berikutnya bukan di repo ini: spike **M0 desktop**
   (Wails v3 × CGO × offline di tiga OS). Yang masih menggantung di web: uji HTTP validasi `ssl_mode` dan
-  `root_cert` (butuh `muara_api` dibangun ulang — infra milik user), CA untuk MongoDB, dan UI form koneksi
-  untuk kolom CA.
+  `root_cert` (butuh `muara_api` dibangun ulang — infra milik user) dan UI form koneksi untuk kolom CA.
+  (CA MongoDB ditutup 2026-11-02; CA MySQL memang tidak punya kata kunci di connectornya, dan `threads`
+  sekarang knob `DUCKDB_THREADS`.)
   Update 2026-11-01 di repo ini: `NormalizeMaxMemory` kini menerima unit biner DuckDB
   (`KiB|MiB|GiB|TiB`), **default `DUCKDB_MAX_MEMORY` pindah ke `2GiB`** (keputusan user, konsisten dengan
   desktop), tiga catatan M1.5 yang salah dikoreksi, dan **bundel extension akhirnya menegakkan offline** —
@@ -56,8 +57,9 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   ditolak** karena validator hanya memeriksa bentuk, bukan nilai (blok Budget nol).
   Update 2026-11-02 di repo ini: **CA privat masuk ke DSN Postgres** (`root_cert` → `sslrootcert`, divalidasi
   di titik tulis, blok CA privat), **builder MySQL dibetulkan** dan grammar `mysql_scanner` diukur per karakter
-  dengan perakitnya pindah ke engine (`duckdb.MySQLDSN`), dan `root_cert` ditolak untuk driver yang connector-nya
-  tidak bisa membaca CA (blok MySQL). Keduanya lewat gerbang empat-mode.
+  dengan perakitnya pindah ke engine (`duckdb.MySQLDSN`), `root_cert` ditolak untuk driver yang connector-nya
+  tidak bisa membaca CA (blok MySQL), dan **`threads` keluar dari hardcoded** jadi `DUCKDB_THREADS` +
+  `NormalizeThreads` di engine (blok threads). Semuanya lewat gerbang empat-mode.
 - **Kondisi Backend Terakhir yang Terverifikasi:**
   - Public Sharing & Signed JWT Embed teruji & terpasang.
   - Scheduled Digest & Threshold Alerts Dispatcher teruji & terhubung ke Asynq scheduler.
@@ -370,6 +372,37 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   Belum diuji end-to-end terhadap server Mongo bersertifikat — infra milik user; sample mongo lokal tidak
   ber-TLS dan tetap memakai jalur polos, jadi tidak ada perubahan perilaku bagi stack yang berjalan.
 
+### `threads` DuckDB jadi konfigurasi, dan desktop memilih angkanya sendiri (2026-11-02)
+- **Kenapa kerjanya mulai dari engine:** pertanyaan terbuka M0 (`muara.bi-desktop/PROGRESS.md` §4 butir 1)
+  berbunyi "apakah `threads` perlu ikut profil — masih hardcoded 2". Angkanya hidup di
+  `engine/duckdb/session_cgo.go`, jadi desktop tidak bisa menjawabnya sendiri; engine diberi pintu lebih
+  dulu, baru tiap produk memilih nilainya.
+- **Yang diukur (DuckDB 1.1.3, `SET threads` di mesin 8 core):**
+  - tidak pernah disetel → **8**, yaitu semua core. Itu default DuckDB, dan web multi-tenant tidak boleh
+    mewarisinya cuma karena lupa menyetel.
+  - `0` dan `-1` → `Syntax Error: Must have at least 1 thread!` **dan nilai sebelumnya tetap berlaku**:
+    kegagalan `SET` tidak membuat sesi jadi aman, hanya membuat konfigurasi terlihat jalan.
+  - `999` → **diterima**; tidak ada cap internal, jadi penjepit ke jumlah core adalah pekerjaan engine.
+  - `abc` → error cast.
+- **Aturan `NormalizeThreads`:** `0` berarti "belum dikonfigurasi" (nilai nol bawaan Go) dan menjadi
+  `DefaultThreads = 2`; **negatif ditolak di `NewEngine`** — preseden `0GiB` dari M1.5: salah konfigurasi
+  harus terdengar di startup, bukan pada query pertama; nilai di atas core yang terlihat proses **dijepit** mengikuti
+  preseden `ApplyLimit` (minta lebih dari yang ada → mendapat yang ada), dan angka yang benar-benar berlaku
+  tetap bisa dibaca lewat `current_setting('threads')`.
+- **Web:** knob baru `DUCKDB_THREADS` (default `2`) di `config.DuckDBConfig`, disalin di
+  `app/server/service.go`, ditambah `.env.example` + `docker-compose.yml`. CPU satu pod saat ramai adalah
+  `DUCKDB_THREADS × DUCKDB_MAX_CONCURRENCY`, karena itu defaultnya kecil dan bukan "semua core".
+  Yang **belum** diukur: `runtime.NumCPU()` di container dengan `--cpus` — pembatasan berupa quota tidak
+  mengubah affinity, jadi di sana penjepitnya bisa lebih longgar; itu ditulis sebagai batasan yang harus
+  disetel manual, bukan sebagai fakta.
+- **Desktop:** `threadBudget() = NumCPU-1` (minimal 1) dipasang di `NewQueryService`. Satu user, satu sesi,
+  jadi hampir seluruh mesin boleh dipakai dan satu core ditinggal untuk jendela aplikasinya sendiri. Ini
+  **kebijakan produk, bukan ambang yang terukur**; yang terbukti hanya dua hal: angkanya sampai ke DuckDB
+  (`Status()` membaca `current_setting('threads')`) dan angkanya selalu di dalam mesin. `cmd/spike` sengaja
+  tidak disentuh — tugasnya membuktikan default engine sampai, sama seperti `max_memory`.
+- **Masih terbuka:** apakah `cores-1` benar-benar lebih baik daripada 2 untuk `ATTACH` lewat jaringan adalah
+  pertanyaan performa, dan pengukurannya tetap butuh jalur Postgres non-localhost (infra milik user).
+
 ---
 
 ## 4. Phase-by-Phase Execution Checklist
@@ -555,7 +588,7 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   - Budget bersama: `internal/limiter/semaphore.go` — sorted set Redis ber-Lua (`ZREMRANGEBYSCORE` prune → `ZCARD` → `ZADD` dalam satu script) sehingga dua proses tidak bisa merebut slot terakhir. Slot yang punya pemanggil aktif diperpanjang tiap `lease/3`; slot milik proses yang mati berhenti diperpanjang dan diklaim kembali setelah lease lewat. Redis tidak dapat diakses → *fail open* dengan warning (mesin tetap punya batas per-proses), dan antre yang batal karena pemanggil putusnya koneksi tetap `context.Canceled`, bukan 429.
   - Beban riil (`MUARA_E2E_REDIS=127.0.0.1:6379 go test ./internal/limiter -v`): 24 pemanggil bersamaan lewat 24 instance `Semaphore` berbeda (meniru beberapa replika API/worker yang berbagi satu Redis), budget 2 — puncak konkurensi terukur tidak pernah melewati budget, semua pemanggil selesai, dan sorted set kosong kembali setelah semua release; plus uji renew hold 2× lease, klaim lease yang diabaikan, dan deadline `ErrNoSlot`.
   - Terpasang di jalur eksekusi: `SessionPreparer.Execute` mengambil slot *setelah* validasi + rewrite SQL (query yang pasti gagal tidak memakan slot) dan `defer release()`; `customerror.NewTooManyRequestsError` → `httputil.WriteTooManyRequestsResponse` (429) yang sebelumnya akan jatuh ke 500 lewat `WriteServiceError`.
-  - Knob baru: `DUCKDB_MAX_CONCURRENCY` (2), `DUCKDB_QUEUE_TIMEOUT_SECONDS` (30), `DUCKDB_SLOT_LEASE_SECONDS` (120), `WORKER_CONCURRENCY` (4) — ada di `config.DuckDBConfig`/`Config`, `docker-compose.yml` anchor `x-core-env`, dan `.env.example`. `worker/server.go` tidak lagi hardcode `Concurrency: 10`; bobot antrean pindah ke `tasks.QueueWeights` satu-satunya sumber kebenaran.
+  - Knob baru: `DUCKDB_MAX_CONCURRENCY` (2), `DUCKDB_QUEUE_TIMEOUT_SECONDS` (30), `DUCKDB_SLOT_LEASE_SECONDS` (120), `WORKER_CONCURRENCY` (4) — ada di `config.DuckDBConfig`/`Config`, `docker-compose.yml` anchor `x-core-env`, dan `.env.example`. `DUCKDB_THREADS` (2) menyusul 2026-11-02 di empat tempat yang sama. `worker/server.go` tidak lagi hardcode `Concurrency: 10`; bobot antrean pindah ke `tasks.QueueWeights` satu-satunya sumber kebenaran.
   - Prioritas Asynq diverifikasi terhadap Redis hidup (`go test ./internal/tasks`): tiap tipe task benar-benar masuk antrean yang berbobot (alert→critical, query/digest→default, export→heavy) dibaca ulang lewat `asynq.Inspector`, termasuk retry dan timeout.
   - Temuan: task `query:execute` tidak pernah memasang timeout, jadi Asynq memberi default **30 menit** — satu query macet menahan slot worker sangat lama. Sekarang diikat 90 detik (deadline antrean + statement timeout). Catatan: `max_memory` DuckDB masih hardcoded 2 GB/sesi di `session_cgo.go`, jadi `DUCKDB_MAX_CONCURRENCY × 2 GB` adalah memori puncak yang harus tersedia di host/container. *(Sudah tidak berlaku sejak M1.5 2026-10-31: angka itu kini `DUCKDB_MAX_MEMORY`/`GuardrailConfig.MaxMemory` — lihat §3.)*
 - [x] Cache & RLS verification tests.

@@ -35,6 +35,10 @@ x-core-env: &core-env
   # its temp directory instead of allocating, so a ceiling above the VM's RAM
   # slows queries down rather than OOM-killing them.
   DUCKDB_MAX_MEMORY: ${DUCKDB_MAX_MEMORY:-2GiB}
+  # CPU workers per session; the pod's CPU demand at full load is this x
+  # DUCKDB_MAX_CONCURRENCY. Above the visible core count it is clamped, so on a
+  # machine with more cores than the container is meant to use, lower it here.
+  DUCKDB_THREADS: ${DUCKDB_THREADS:-2}
   DUCKDB_SLOT_LEASE_SECONDS: ${DUCKDB_SLOT_LEASE_SECONDS:-120}
   DUCKDB_QUEUE_TIMEOUT_SECONDS: ${DUCKDB_QUEUE_TIMEOUT_SECONDS:-30}
   WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}

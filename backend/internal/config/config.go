@@ -35,6 +35,15 @@ type DuckDBConfig struct {
 	// either mistake at startup.
 	MaxMemory string `env:"DUCKDB_MAX_MEMORY" default:"2GiB"`
 
+	// Threads is the DuckDB worker threads a single session may use. The CPU cost
+	// of a busy pod is this x DUCKDB_MAX_CONCURRENCY, so keep it near the cores the
+	// pod is given; a count above the cores the process can see is clamped, and a
+	// negative one fails at startup.
+	//
+	// The clamp counts usable CPUs, which a CPU *quota* (docker --cpus) does not
+	// change — so on a quota-limited container this must still be set by hand.
+	Threads int `env:"DUCKDB_THREADS" default:"2"`
+
 	// MaxConcurrentExecutions is how many DuckDB sessions may run at once across
 	// every API and worker process sharing this Redis. A session may grow to
 	// DUCKDB_MAX_MEMORY before it spills to its temp directory, so size the two

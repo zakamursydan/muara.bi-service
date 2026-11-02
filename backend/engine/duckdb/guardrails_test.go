@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -143,6 +144,57 @@ func TestNormalizeMaxMemory(t *testing.T) {
 		}
 		if !errors.Is(err, ErrInvalidMemoryBudget) {
 			t.Errorf("%q rejected with the wrong error: %v", zero, err)
+		}
+	}
+}
+
+func TestNormalizeThreads(t *testing.T) {
+	cores := runtime.NumCPU()
+
+	// The default is the number the web product is sized around, and it is smaller
+	// than DuckDB's own default (every core) on purpose.
+	if DefaultThreads != 2 {
+		t.Errorf("DefaultThreads = %d, want 2", DefaultThreads)
+	}
+
+	// An unset int is how "not configured" arrives from a config struct, and it must
+	// not reach DuckDB — which refuses 0 and leaves the previous setting running.
+	if got, err := NormalizeThreads(0); err != nil || got != min(DefaultThreads, cores) {
+		t.Errorf("unset threads = %d err=%v, want %d on a %d-core host", got, err, min(DefaultThreads, cores), cores)
+	}
+
+	// Every accepted count stays inside the cores this process can actually see.
+	for _, n := range []int{1, 2, 4, 8} {
+		got, err := NormalizeThreads(n)
+		if err != nil {
+			t.Errorf("%d accepted: %v", n, err)
+			continue
+		}
+		if got != min(n, cores) {
+			t.Errorf("threads %d -> %d, want %d on a %d-core host", n, got, min(n, cores), cores)
+		}
+	}
+
+	// DuckDB applies no cap of its own: SET threads=999 was accepted on an 8-core
+	// machine, so the clamp is this product's job.
+	if got, err := NormalizeThreads(999); err != nil || got != cores {
+		t.Errorf("threads 999 -> %d err=%v, want the %d visible cores", got, err, cores)
+	}
+
+	// Negative counts are the other half of the same DuckDB error. They are refused
+	// at startup because a session that fails to apply them keeps whatever the
+	// previous value was — an unbounded run that looks configured.
+	for _, bad := range []int{-1, -2, -1000} {
+		got, err := NormalizeThreads(bad)
+		if err == nil {
+			t.Errorf("%d accepted as %d; must fail at startup", bad, got)
+			continue
+		}
+		if !errors.Is(err, ErrInvalidThreadCount) {
+			t.Errorf("%d rejected with the wrong error: %v", bad, err)
+		}
+		if got != 0 {
+			t.Errorf("%d returned %d alongside an error; want 0", bad, got)
 		}
 	}
 }

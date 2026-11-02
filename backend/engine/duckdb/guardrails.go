@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ var (
 	ErrEmptyQuery          = errors.New("query cannot be empty")
 	ErrInvalidRLSRule      = errors.New("invalid row-level security rule")
 	ErrInvalidMemoryBudget = errors.New("invalid duckdb memory budget")
+	ErrInvalidThreadCount  = errors.New("invalid duckdb thread count")
 )
 
 // rlsOperators is the closed set of comparisons an RLS rule may use. Values are
@@ -92,6 +94,41 @@ func NormalizeMaxMemory(raw string) (string, error) {
 	return trimmed, nil
 }
 
+// DefaultThreads is the DuckDB worker threads a session gets when the
+// deployment does not name a number. It is well below a modern core count on
+// purpose: DuckDB's own default, measured on 1.1.3, is every core of the machine
+// (8 on the machine this was checked on), and the web product runs
+// DUCKDB_MAX_CONCURRENCY sessions in one process — so threads is a share of the
+// pod's CPU budget rather than a speed dial, and the multiplication that matters
+// is threads x sessions.
+const DefaultThreads = 2
+
+// NormalizeThreads resolves a per-session thread count.
+//
+// Zero means "not configured" and becomes DefaultThreads. That is the only
+// spelling Go gives an unset int, and DuckDB refuses it outright (measured on
+// 1.1.3: SET threads=0 and SET threads=-1 both answer
+// "Syntax Error: Must have at least 1 thread!", and the previous setting stays
+// in effect), so the config layer has to translate it rather than pass it on.
+//
+// A count above the cores this process can see is clamped, not rejected.
+// DuckDB applies no cap of its own — SET threads=999 was accepted on an 8-core
+// machine — so an over-eager config would otherwise oversubscribe the CPU of a
+// pod shared with other tenants. The clamp follows ApplyLimit: asking for more
+// than exists gets what exists. It is also checkable after the fact, because
+// current_setting('threads') echoes the number actually in effect.
+func NormalizeThreads(n int) (int, error) {
+	if n == 0 {
+		n = DefaultThreads
+	} else if n < 0 {
+		return 0, fmt.Errorf("%w: %d is negative; a session needs at least 1 thread", ErrInvalidThreadCount, n)
+	}
+	if cores := runtime.NumCPU(); n > cores {
+		return cores, nil
+	}
+	return n, nil
+}
+
 // GuardrailConfig holds execution limits
 type GuardrailConfig struct {
 	MaxRows          int           `json:"max_rows"`
@@ -99,6 +136,10 @@ type GuardrailConfig struct {
 	// MaxMemory is the DuckDB per-session memory budget, e.g. "2GiB" (binary) or
 	// "2GB" (decimal, 7% smaller than it reads). Empty keeps DefaultMaxMemory.
 	MaxMemory string `json:"max_memory"`
+	// Threads is how many CPU workers one DuckDB session may use. Zero keeps
+	// DefaultThreads; a negative value is rejected at startup and a count above
+	// the machine's visible cores is clamped to them.
+	Threads int `json:"threads"`
 	// ExtensionDirectory is where DuckDB looks for already-installed extensions.
 	// Empty keeps DuckDB's default (the user home directory).
 	ExtensionDirectory string `json:"extension_directory"`
@@ -110,12 +151,18 @@ func DefaultGuardrailConfig() GuardrailConfig {
 		MaxRows:          DefaultMaxRows,
 		StatementTimeout: 30 * time.Second,
 		MaxMemory:        DefaultMaxMemory,
+		Threads:          DefaultThreads,
 	}
 }
 
 // maxMemory resolves the budget a session should apply.
 func (c GuardrailConfig) maxMemory() (string, error) {
 	return NormalizeMaxMemory(c.MaxMemory)
+}
+
+// threads resolves the CPU budget a session should apply.
+func (c GuardrailConfig) threads() (int, error) {
+	return NormalizeThreads(c.Threads)
 }
 
 // ValidateQuery inspects raw SQL against forbidden keywords

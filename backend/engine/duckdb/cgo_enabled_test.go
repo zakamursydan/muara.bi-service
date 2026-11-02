@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -95,6 +96,61 @@ func TestEngineRejectsUnusableMemoryBudget(t *testing.T) {
 	// checking the value is that the operator learns about it here.
 	if _, err := NewEngine(GuardrailConfig{MaxMemory: "0GiB"}); err == nil {
 		t.Fatal("a zero budget must fail at startup, not disable the memory guardrail")
+	}
+}
+
+// The thread count has to land in the session, not only in the config. Two things
+// make the read-back worth asserting: DuckDB keeps the previous value when a SET
+// threads fails, so a config that never applies looks exactly like a working
+// limit; and it applies no cap of its own (999 was accepted on an 8-core machine),
+// so the visible number is this engine's clamp rather than the host's core count.
+func TestEngineAppliesConfiguredThreads(t *testing.T) {
+	cores := runtime.NumCPU()
+	cases := []struct {
+		n    int
+		want int
+	}{
+		{n: 1, want: min(1, cores)},
+		{n: 2, want: min(2, cores)},
+		{n: 999, want: cores},
+	}
+
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("threads=%d", tc.n), func(t *testing.T) {
+			engine, err := NewEngine(GuardrailConfig{
+				MaxMemory:        "256MB",
+				StatementTimeout: 5 * time.Second,
+				Threads:          tc.n,
+			})
+			if err != nil {
+				t.Fatalf("new engine with threads=%d: %v", tc.n, err)
+			}
+			defer engine.Close()
+
+			ctx := context.Background()
+			session, err := engine.NewSession(ctx)
+			if err != nil {
+				t.Fatalf("new session: %v", err)
+			}
+			defer session.Close()
+
+			res, err := session.Query(ctx, "SELECT current_setting('threads') AS threads", QueryOptions{})
+			if err != nil {
+				t.Fatalf("read threads setting: %v", err)
+			}
+			got := strings.TrimSpace(fmt.Sprint(res.Rows[0]["threads"]))
+			if got != strconv.Itoa(tc.want) {
+				t.Fatalf("configured %d landed as %q on a %d-core host, want %d", tc.n, got, cores, tc.want)
+			}
+		})
+	}
+}
+
+func TestEngineRejectsUnusableThreadCount(t *testing.T) {
+	// DuckDB answers "Must have at least 1 thread!" for these and leaves the session
+	// on its own all-cores default, so the refusal has to happen before that.
+	if _, err := NewEngine(GuardrailConfig{Threads: -1}); err == nil {
+		t.Fatal("a negative thread count must fail at startup, not widen the CPU budget")
 	}
 }
 
