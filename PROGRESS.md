@@ -66,7 +66,10 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   form dibuka ulang lalu disimpan, mode TLS kembali `"prefer"` dan path CA hilang (blok CA UI). Terakhir:
   **`SyncSchema` tidak lagi Postgres-only** — MySQL dan SQLite dibaca lewat katalog DuckDB, MongoDB dan driver
   tak dikenal menolak dengan alasan, plus dua bug ikut tertutup di jalur error (pesan yang membocork `passwd`,
-  cache yang tertimpa `{}`) — lihat blok `SyncSchema` lintas driver (blok di §3). Semuanya lewat gerbang empat-mode.
+  cache yang tertimpa `{}`) — lihat blok `SyncSchema` lintas driver (blok di §3). Dan **katalog sumbernya
+  diperluas** — `DescribeSource` sekarang membaca kunci, nullability, komentar dan taksiran baris dari tiga
+  fungsi katalog DuckDB, dibuktikan pada katalog temp tanpa server apa pun (blok katalog sumber).
+  Semuanya lewat gerbang empat-mode.
 - **Kondisi Backend Terakhir yang Terverifikasi:**
   - Public Sharing & Signed JWT Embed teruji & terpasang.
   - Scheduled Digest & Threshold Alerts Dispatcher teruji & terhubung ke Asynq scheduler.
@@ -508,6 +511,75 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
 - **Yang belum terukur di sini:** MySQL nyata (tidak ada server di mesin ini — yang diuji hanya wiring attach +
   cap-nya lewat fake), Postgres lewat scanner (container sample rusak), dan uji klik di UI `/sources` yang
   masih menunggu `muara_api` dibangun ulang (infra milik user).
+
+---
+
+### Katalog sumber diperluas: kunci, nullability, komentar, taksiran baris (2026-11-02)
+- **Yang dibuka:** butir PLAN desktop "Skema terkualifikasi penuh". Bentuk `DescribeSource` sudah ada sejak butir
+  sebelumnya (`Schema`, `Name`, `Columns[{Name,Type}]`), tetapi isinya baru seperempat dari yang dikirim DuckDB,
+  dan service **membuang `Schema`** saat memetakan ke peta `{tabel: [...]}` — jadi dua schema dengan tabel bernama
+  sama menyatu diam-diam. Perluasan ini dikerjakan di sisi engine lebih dulu karena sisi cache tidak bisa diubah
+  sendirian: empat pembaca `cached_schema` harus berpindah bentuk sekaligus, dan satu jalur pembuatnya (pgx untuk
+  Postgres) belum bisa diukur di mesin ini.
+- **Yang diukur lebih dulu** (DuckDB 1.1.3 + bundel `/Applications/muara-bi.app/…`, fixture SQLite repo desktop,
+  dan katalog `temp` punya DuckDB sendiri), karena isi `CatalogTable` harus kolom yang benar-benar ada, bukan
+  yang diinginkan:
+  - `duckdb_columns()` membawa `is_nullable` (BOOLEAN), `column_default`, `comment` (NULL untuk SQLite),
+    `character_maximum_length`, `numeric_precision`/`numeric_scale`. Tiga pertama dipakai; sisanya belum punya
+    konsumen.
+  - `duckdb_constraints()` membawa `constraint_type`, `constraint_name`, `constraint_column_names` (tipe **LIST**),
+    `referenced_table`, `referenced_column_names` — dan **tidak** punya `referenced_schema`, jadi target FK hanya
+    bisa dibawa sebagai nama tabel (terukur: `referenced_table=parent`). Pada tabel temp berkunci komposit: satu
+    baris `PRIMARY KEY` dengan `constraint_column_names=[pid,org]`, satu baris `FOREIGN KEY` dengan
+    `referenced_column_names=[id,org]`, plus satu baris `NOT NULL` per kolom. Pada fixture SQLite: `PRIMARY KEY id`
+    dan dua baris `NOT NULL`.
+  - `duckdb_tables()` membawa `comment`, `has_primary_key`, `estimated_size`, `column_count`, dan `sql` (DDL
+    lengkap). **View tidak muncul di sini** — `CREATE TEMP VIEW` terlihat di `duckdb_columns()` tetapi tidak punya
+    baris `duckdb_tables()`; itu sebabnya ukuran baris view bukan 0.
+  - Driver menyerahkan LIST ke `database/sql` sebagai `[]interface{}` (terukur: `[]interface {}([pid org])`), maka
+    `catalogStrings` yang meratakan; elemen non-string, kosong, atau `nil` dibuang — nama kolom kosong tidak akan
+    pernah bisa dipakai JOIN.
+- **Dua angka yang tidak boleh disalahbaca:**
+  1. `estimated_size` **bukan** jumlah baris. Fixture ini berisi 6 baris (`SELECT count(*)` = 6) tetapi scanner
+     melaporkan **5**. Kolomnya karena itu dinamai `EstimatedRows`, dan `UnknownRowCount = -1` dipakai ketika
+     katalog tidak punya entri — bukan `0`, yang terbaca "tabel ini kosong" padahal tidak pernah diukur.
+  2. `is_nullable` adalah deklarasi, bukan konsekuensi kunci. `id INTEGER PRIMARY KEY` dilaporkan **nullable**
+     (rowid alias SQLite), sedangkan dua kolom `NOT NULL` dilaporkan tidak. Kalau katalog tidak bilang apa-apa,
+     kolom dibaca **nullable**: mengarang `NOT NULL` adalah arah yang membuat SQL hasil AI salah, bukan sebaliknya.
+- **Yang dipasang:** `DescribeSource` menjalankan tiga query katalog (`catalogColumnsQuery`,
+  `catalogConstraintsQuery`, `catalogTablesQuery`) lalu `buildCatalog` menggabungkannya; daftar kolom yang
+  menentukan relasi apa saja yang muncul, jadi constraint atau baris tabel untuk relasi tanpa kolom dibuangan,
+  bukan dibuatkan entri. Masing-masing query membawa sentinel `LIMIT n+1` dengan cap yang sama
+  (`MaxCatalogColumns`) dan pesan error yang menyebut bagian katalog mana yang melebar.
+- **Satu lubang yang dibuka oleh pengukuran, bukan oleh fitur:** baris `information_schema`/`pg_catalog` ikut
+  termakan budget baris. Sumber Postgres punya ribuan kolom bookkeeping sebelum satu kolom pun milik pengguna,
+  jadi filter schema sistem sekarang juga ada di WHERE (`systemSchemaFilter`) — peta `systemSchemas` di Go tetap
+  aturan yang teruji (case-insensitive, tidak butuh sumber), konstanta SQL hanya menjaga fetch tetap murah.
+  Testinya mengunci itu dengan cara yang tidak longgar: **satu-satunya teks berquote** yang boleh muncul di
+  statement katalog adalah nama konstanta package ini, sehingga tidak ada jalur bagi teks caller masuk ke SQL.
+- `constraint_type` **sengaja tidak difilter di SQL.** Ejaannya milik masing-masing scanner (terukur `PRIMARY
+  KEY`/`NOT NULL` dari sqlite_scanner, `FOREIGN KEY` dari katalog DuckDB); filter string yang salah eja membuat
+  cache melaporkan "tabel ini tidak punya kunci" — persis kegagalan diam yang baru saja ditutup di butir
+  SyncSchema. Penyaringan terjadi di Go, baris `NOT NULL` diabaikan karena `is_nullable` sudah membawanya, dan
+  `CHECK` tidak dibawa karena tidak berarti untuk tree, completion, maupun hint join.
+- **Bentuk `cached_schema` belum berubah, dan itu bukan kelambanan.** Memasang `alias.schema.tabel` + PK/FK +
+  nullability hanya jujur kalau **semua** jalur pembuatnya menghasilkan bentuk yang sama; jalur Postgres masih
+  pgx, dan satu-satunya Postgres di mesin ini tetap mati di sisinya — dicoba ulang 2026-11-02 lewat
+  `AttachPostgres`, masih `FATAL: could not open file "global/pg_filenode.map": I/O error`. Mengubah JSON sekarang
+  berarti mengubah empat pembaca (`ai_service.go:358`, `stores/schema-store.ts`, `hooks/use-schema-tree.ts`,
+  `lib/monaco-completion.ts`) sambil menebak apa yang pgx kembalikan untuk `is_nullable` dan `pg_description`.
+  Sisa butir ini disimpan sebagai satu pekerjaan terukur: hidupkan sample Postgres, ukur kedua jalur, lalu
+  pindah bentuk cache + pembaca + prompt AI sekaligus.
+- **Bukti (semua terukur):** `TestDescribeSourceReadsKeysFromADuckDBCatalog` mengunci jalur constraint tanpa
+  server apa pun — kunci komposit, FK lengkap dengan kolom rujukannya, nullability, `estimated_size = 0` untuk
+  tabel kosong lawan `UnknownRowCount` untuk view (helper-nya memakai `*cgoSession` di dalam paket karena
+  `CREATE TEMP TABLE` memang bukan method yang mau dibuka ke caller); `TestDescribeSourceOnAttachedSQLite`
+  diperluas dengan schema `main`, PK `id`, nullability terukur, komentar kosong, dan fakta bahwa scanner memang
+  melaporkan ukuran; `TestBuildCatalog*` (2 kasus) dan `TestCatalogStringsFlattensDriverLists` menguji lipatan di
+  kedua sisi; `TestCatalogQueriesBindTheAliasAndKeepTheirOrder` mengunci tiga query (bind, budget, urutan, filter).
+  Gerbang empat-mode (engine + web × `CGO_ENABLED=1/0`, build/vet/test) dan verifikasi modul desktop (konsumen
+  kedua dari engine yang sama) hijau, `gofmt` bersih.
+
 
 ---
 

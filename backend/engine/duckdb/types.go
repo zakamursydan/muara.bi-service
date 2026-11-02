@@ -92,9 +92,9 @@ type Session interface {
 	// RegisterJSONData mounts an in-memory JSON array as a temporary table/view
 	RegisterJSONData(ctx context.Context, viewName string, jsonData []byte) error
 
-	// DescribeSource lists the tables and columns of the attached catalog named
-	// alias, read from DuckDB's own catalogue so every scanner is covered by the
-	// same rule. It returns metadata only — no row of source data is read.
+	// DescribeSource lists the tables, columns and keys of the attached catalog
+	// named alias, read from DuckDB's own catalogue so every scanner is covered by
+	// the same rule. It returns metadata only — no row of source data is read.
 	DescribeSource(ctx context.Context, alias string) ([]CatalogTable, error)
 
 	// Query executes an analytical statement under opts.MaxRows and reports

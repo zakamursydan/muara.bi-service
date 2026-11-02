@@ -5,6 +5,7 @@ package duckdb
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -140,6 +141,46 @@ func TestDescribeSourceOnAttachedSQLite(t *testing.T) {
 			t.Errorf("column %s type = %q, want the scanner's %q", column.Name, column.Type, expected)
 		}
 	}
+
+	// The schema the scanner mounted, and the key it read out of the SQLite
+	// declaration: CREATE TABLE orders (id INTEGER PRIMARY KEY, ...).
+	if orders.Schema != "main" {
+		t.Errorf("schema = %q, want main", orders.Schema)
+	}
+	if got := strings.Join(orders.PrimaryKey, ","); got != "id" {
+		t.Errorf("primary key = %v, want the single declared key", orders.PrimaryKey)
+	}
+	if len(orders.ForeignKeys) != 0 {
+		t.Errorf("foreign keys = %#v, want none for this fixture", orders.ForeignKeys)
+	}
+
+	// Nullability is the declaration, not the key: measured, id is reported
+	// nullable because an INTEGER PRIMARY KEY is a rowid alias, while the two NOT
+	// NULL columns are reported as not nullable.
+	nullable := map[string]bool{"id": true, "channel": false, "total": false}
+	for name, wantNullable := range nullable {
+		column := findCatalogColumn(orders, name)
+		if column == nil {
+			t.Fatalf("column %q missing: %#v", name, orders.Columns)
+		}
+		if column.Nullable != wantNullable {
+			t.Errorf("column %s nullable = %v, want %v", name, column.Nullable, wantNullable)
+		}
+	}
+
+	// SQLite has no comment concept, so the catalogue answers NULL and the field
+	// stays empty rather than invented.
+	if orders.Comment != "" {
+		t.Errorf("table comment = %q, want empty for a source without comments", orders.Comment)
+	}
+
+	// The scanner does report a size. Measured on 2026-11-02: estimated_size = 5
+	// for a fixture that holds 6 rows, so this number is the source's own reading
+	// and not a count this engine took — a UI that shows it has to call it an
+	// estimate.
+	if orders.EstimatedRows == UnknownRowCount {
+		t.Errorf("rows = %d, want the size the scanner reported", orders.EstimatedRows)
+	}
 	for _, table := range tables {
 		if table.Schema == "information_schema" || table.Schema == "pg_catalog" {
 			t.Errorf("system schema %q reached the discovery", table.Schema)
@@ -151,6 +192,103 @@ func findCatalogTable(tables []CatalogTable, name string) *CatalogTable {
 	for i := range tables {
 		if tables[i].Name == name {
 			return &tables[i]
+		}
+	}
+	return nil
+}
+
+// execSourceDDL runs statement the Session interface deliberately does not
+// expose. It stays inside the package so the constraint path can be measured
+// against DuckDB's own catalog instead of being asserted from a source server
+// this machine does not have.
+func execSourceDDL(t *testing.T, session Session, stmt string) {
+	t.Helper()
+	cgo, ok := session.(*cgoSession)
+	if !ok {
+		t.Fatalf("want the CGO session to create the fixture tables, got %T", session)
+	}
+	if _, err := cgo.db.ExecContext(context.Background(), stmt); err != nil {
+		t.Fatalf("%s: %v", stmt, err)
+	}
+}
+
+// The keys and the row count have to be read from a real DuckDB catalog, not just
+// grouped from test rows. A temp table pair is the only source with a composite
+// primary key and a foreign key that this machine can offer without a server.
+func TestDescribeSourceReadsKeysFromADuckDBCatalog(t *testing.T) {
+	session := catalogSession(t, "")
+	ctx := context.Background()
+
+	execSourceDDL(t, session, "CREATE TEMP TABLE parent(id BIGINT, org VARCHAR, note VARCHAR, PRIMARY KEY(id, org))")
+	execSourceDDL(t, session, "CREATE TEMP TABLE child(pid BIGINT, org VARCHAR, total DOUBLE, PRIMARY KEY(pid, org), FOREIGN KEY(pid, org) REFERENCES parent(id, org))")
+	execSourceDDL(t, session, "CREATE TEMP VIEW keyless_view AS SELECT 1 AS a")
+
+	tables, err := session.DescribeSource(ctx, "temp")
+	if err != nil {
+		t.Fatalf("describe source: %v", err)
+	}
+
+	child := findCatalogTable(tables, "child")
+	if child == nil {
+		t.Fatalf("child not found: %#v", tables)
+	}
+	if got := strings.Join(child.PrimaryKey, ","); got != "pid,org" {
+		t.Errorf("primary key = %v, want the composite pair DuckDB declared", child.PrimaryKey)
+	}
+	if len(child.ForeignKeys) != 1 {
+		t.Fatalf("foreign keys = %#v, want the reference to parent", child.ForeignKeys)
+	}
+	fk := child.ForeignKeys[0]
+	// Measured: DuckDB reports the target as a bare table name with its columns
+	// filled in, so this is the join evidence a builder or a prompt can use.
+	if fk.RefTable != "parent" || strings.Join(fk.RefColumns, ",") != "id,org" {
+		t.Errorf("foreign key = %#v, want parent(id, org)", fk)
+	}
+
+	parent := findCatalogTable(tables, "parent")
+	if parent == nil || len(parent.ForeignKeys) != 0 {
+		t.Fatalf("parent = %#v, want it found with no outgoing reference", parent)
+	}
+	if got := strings.Join(parent.PrimaryKey, ","); got != "id,org" {
+		t.Errorf("parent primary key = %v, want id,org", parent.PrimaryKey)
+	}
+
+	// A column the source did not declare NOT NULL is reported as nullable, and one
+	// inside the primary key is not.
+	if column := findCatalogColumn(child, "total"); column == nil || !column.Nullable {
+		t.Errorf("total = %#v, want it reported nullable", column)
+	}
+	if column := findCatalogColumn(child, "pid"); column == nil || column.Nullable {
+		t.Errorf("pid = %#v, want it reported not nullable through the key", column)
+	}
+
+	// Both tables were just created and are empty, so 0 is the catalogue's own
+	// answer — which is what makes UnknownRowCount a different statement.
+	if child.EstimatedRows != 0 {
+		t.Errorf("child rows = %d, want the 0 an empty table reports", child.EstimatedRows)
+	}
+
+	// A view keeps its columns and its no-key reading: it is not in
+	// duckdb_tables(), and its size is unknown rather than zero.
+	view := findCatalogTable(tables, "keyless_view")
+	if view == nil {
+		t.Fatalf("view missing from the discovery: %#v", tables)
+	}
+	if view.EstimatedRows != UnknownRowCount {
+		t.Errorf("view rows = %d, want %d (no duckdb_tables entry)", view.EstimatedRows, UnknownRowCount)
+	}
+	if len(view.PrimaryKey) != 0 || len(view.ForeignKeys) != 0 {
+		t.Errorf("view keys = %#v / %#v, want none", view.PrimaryKey, view.ForeignKeys)
+	}
+}
+
+func findCatalogColumn(table *CatalogTable, name string) *CatalogColumn {
+	if table == nil {
+		return nil
+	}
+	for i := range table.Columns {
+		if table.Columns[i].Name == name {
+			return &table.Columns[i]
 		}
 	}
 	return nil

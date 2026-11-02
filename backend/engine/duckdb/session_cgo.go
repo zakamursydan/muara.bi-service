@@ -187,10 +187,10 @@ func (s *cgoSession) RegisterJSONData(ctx context.Context, viewName string, json
 	return nil
 }
 
-// DescribeSource reads the tables and columns of an attached catalog. It runs on
-// the session's own connection, so it answers for exactly what a query executed
-// in this session could see — including a catalog mounted from a bundle on an
-// offline machine.
+// DescribeSource reads the tables, columns and keys of an attached catalog. It
+// runs on the session's own connection, so it answers for exactly what a query
+// executed in this session could see — including a catalog mounted from a bundle
+// on an offline machine.
 func (s *cgoSession) DescribeSource(ctx context.Context, alias string) ([]CatalogTable, error) {
 	if !sqlident.IsPlain(alias) {
 		return nil, fmt.Errorf("invalid source name %q: use letters, digits and underscores", alias)
@@ -201,33 +201,140 @@ func (s *cgoSession) DescribeSource(ctx context.Context, alias string) ([]Catalo
 		defer cancel()
 	}
 
+	columns, err := s.scanCatalogColumns(ctx, alias)
+	if err != nil {
+		return nil, err
+	}
+	constraints, err := s.scanCatalogConstraints(ctx, alias)
+	if err != nil {
+		return nil, err
+	}
+	tables, err := s.scanCatalogTables(ctx, alias)
+	if err != nil {
+		return nil, err
+	}
+
+	return buildCatalog(columns, constraints, tables), nil
+}
+
+// catalogTooWide reports a catalogue read that went past the cap. Each query asks
+// for one row more than it will accept, so reaching this means the source really
+// is wider — and the honest answer is to refuse rather than return a list that
+// reads like the whole catalogue.
+func catalogTooWide(alias, part string, limit int) error {
+	return fmt.Errorf("source %q has more than %d %s; point this connection at a narrower database",
+		alias, limit, part)
+}
+
+func (s *cgoSession) scanCatalogColumns(ctx context.Context, alias string) ([]catalogRow, error) {
 	rows, err := s.db.QueryContext(ctx, catalogColumnsQuery(MaxCatalogColumns+1), alias)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read the catalogue of %s: %w", alias, err)
+		return nil, fmt.Errorf("failed to read the columns of %s: %w", alias, err)
 	}
 	defer rows.Close()
 
 	scanned := make([]catalogRow, 0, 64)
 	for rows.Next() {
-		var row catalogRow
-		if err := rows.Scan(&row.Schema, &row.Table, &row.Column, &row.Type); err != nil {
-			return nil, fmt.Errorf("failed to scan a catalogue row of %s: %w", alias, err)
+		var (
+			row          catalogRow
+			nullable     sql.NullBool
+			defaultValue sql.NullString
+			comment      sql.NullString
+		)
+		if err := rows.Scan(&row.Schema, &row.Table, &row.Column, &row.Type,
+			&nullable, &defaultValue, &comment); err != nil {
+			return nil, fmt.Errorf("failed to scan a column row of %s: %w", alias, err)
 		}
+		// A catalogue that does not say whether a column is nullable is read as
+		// nullable: inventing a NOT NULL is the direction that breaks a statement.
+		row.Nullable = !nullable.Valid || nullable.Bool
+		row.Default = defaultValue.String
+		row.Comment = comment.String
 		scanned = append(scanned, row)
 
-		// The query asks for one row past the cap. Reaching it proves the source is
-		// wider than a schema cache can honestly hold, instead of returning a
-		// truncated list that reads like the whole catalogue.
 		if len(scanned) > MaxCatalogColumns {
-			return nil, fmt.Errorf("source %q has more than %d columns; point this connection at a narrower database",
-				alias, MaxCatalogColumns)
+			return nil, catalogTooWide(alias, "columns", MaxCatalogColumns)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error while reading the catalogue of %s: %w", alias, err)
+		return nil, fmt.Errorf("error while reading the columns of %s: %w", alias, err)
 	}
+	return scanned, nil
+}
 
-	return groupCatalog(scanned), nil
+func (s *cgoSession) scanCatalogConstraints(ctx context.Context, alias string) ([]constraintRow, error) {
+	rows, err := s.db.QueryContext(ctx, catalogConstraintsQuery(MaxCatalogColumns+1), alias)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read the keys of %s: %w", alias, err)
+	}
+	defer rows.Close()
+
+	scanned := make([]constraintRow, 0, 64)
+	for rows.Next() {
+		var (
+			row        constraintRow
+			conName    sql.NullString
+			columns    any
+			refTable   sql.NullString
+			refColumns any
+		)
+		if err := rows.Scan(&row.Schema, &row.Table, &row.Type, &conName,
+			&columns, &refTable, &refColumns); err != nil {
+			return nil, fmt.Errorf("failed to scan a constraint row of %s: %w", alias, err)
+		}
+		// A generated key name is the source's business; a constraint without one
+		// still describes a real key.
+		row.Name = conName.String
+		row.Columns = catalogStrings(columns)
+		row.RefTable = refTable.String
+		row.RefColumns = catalogStrings(refColumns)
+		scanned = append(scanned, row)
+
+		if len(scanned) > MaxCatalogColumns {
+			return nil, catalogTooWide(alias, "constraints", MaxCatalogColumns)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error while reading the keys of %s: %w", alias, err)
+	}
+	return scanned, nil
+}
+
+func (s *cgoSession) scanCatalogTables(ctx context.Context, alias string) ([]tableRow, error) {
+	rows, err := s.db.QueryContext(ctx, catalogTablesQuery(MaxCatalogColumns+1), alias)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read the table metadata of %s: %w", alias, err)
+	}
+	defer rows.Close()
+
+	scanned := make([]tableRow, 0, 64)
+	for rows.Next() {
+		var (
+			row       tableRow
+			comment   sql.NullString
+			estimated sql.NullInt64
+		)
+		if err := rows.Scan(&row.Schema, &row.Name, &comment, &estimated); err != nil {
+			return nil, fmt.Errorf("failed to scan a table row of %s: %w", alias, err)
+		}
+		row.Comment = comment.String
+		// Views have no duckdb_tables() entry and a table can carry a NULL size;
+		// both stay UnknownRowCount instead of the 0 that reads as "empty".
+		if estimated.Valid {
+			row.Rows = estimated.Int64
+		} else {
+			row.Rows = UnknownRowCount
+		}
+		scanned = append(scanned, row)
+
+		if len(scanned) > MaxCatalogColumns {
+			return nil, catalogTooWide(alias, "tables", MaxCatalogColumns)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error while reading the table metadata of %s: %w", alias, err)
+	}
+	return scanned, nil
 }
 
 func (s *cgoSession) Query(ctx context.Context, sqlQuery string, opts QueryOptions, args ...any) (*QueryResult, error) {
