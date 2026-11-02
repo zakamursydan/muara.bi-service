@@ -71,7 +71,9 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   fungsi katalog DuckDB, dibuktikan pada katalog temp tanpa server apa pun (blok katalog sumber). Dan **penanda
   pemotongan akhirnya sampai ke layar**: empat field yang sudah dikirim API sejak M1.4 kini dirender di lima
   permukaan — callout amber di panel hasil, sufiks + ikon ⚠ di kartu widget dan halaman share (blok penanda
-  pemotongan).
+  pemotongan). Terakhir: **aturan path sumber file** — bentuk kanonik relatif terhadap folder bundle, dan empat
+  penolakan (`../`, `~`, glob, relatif-tanpa-anchor) yang seluruhnya lahir dari mengukur apa yang DuckDB lakukan
+  terhadap sebuah string path (blok aturan path).
   Semuanya lewat gerbang empat-mode.
 - **Kondisi Backend Terakhir yang Terverifikasi:**
   - Public Sharing & Signed JWT Embed teruji & terpasang.
@@ -631,6 +633,54 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   Round trip-nya sementara dibuktikan di level struct (butir 2); bukti HTTP sungguhan butuh infra user sehat lagi.
 - **Gerbang:** empat-mode web (engine + web × `CGO_ENABLED=1/0`) hijau + `gofmt` bersih; desktop
   `DESKTOP-DONE` dengan `fail=0` termasuk `CGO-OFF-REJECTED-OK` (biner app tanpa CGO memang harus gagal).
+
+### Aturan path sumber file di engine (2026-11-02, BRD desktop §5.5)
+
+Butir ini dibuka oleh desktop ("sumber file v1 — sisa"), tapi tempat aturannya ada di engine: **satu implementasi,
+dua konsumen** — web menyimpan path server, desktop menyimpan path relatif-bundle, dan keduanya harus mendapat
+kesimpulan yang sama. Tidak ada satu pun angka pendukung §5.5 sebelumnya, jadi yang diukur lebih dulu adalah
+**apa yang dilakukan DuckDB pada sebuah string path** (v1.1.3, `SELECT version()` dibaca dari session yang sama;
+tabel lengkap di desktop `docs/engine-map.md` §22):
+
+- **Path relatif diselesaikan terhadap folder kerja proses — dan itu terjadi lagi setiap pembacaan**, bukan sekali
+  saat `CREATE VIEW`. Ukurnya: satu view yang sama menjawab 1 baris lalu 4 baris hanya karena `chdir`, dengan dua
+  folder berisi `orders.csv` berbeda. Ini yang membuat bentuk tersimpan wajib absolut sebelum masuk SQL.
+- **`../` dibaca tanpa keluhan** (`read_parquet('../p1.parquet')` → 2 baris pada target yang ada). Jadi penolakan
+  "keluar folder bundle" bukan kemampuan DuckDB dan harus ditegakkan di Go.
+- **`~` tidak diekspansi**: error memuat literal `~/muara-no-such-file-9c1a.csv`. Tidak ada shell di antara
+  definisi dan reader.
+- **Argumen reader adalah pattern, bukan nama berkas.** `x*.csv` dan `x?.csv` membaca **dua** berkas sekaligus
+  (3 baris dari definisi yang menyebut satu berkas) di ketiga reader (csv/json/parquet), dan `log[1].csv` hanya
+  kebetulan terbaca karena `[1]` kelas karakter — `log[12].csv` akan membaca `log1.csv`/`log2.csv`, bukan dirinya.
+  `disable_glob_matching` ditolak sebagai parameter (`Binder Error: Invalid named parameter … for read_csv_auto`),
+  jadi tidak ada jalan keluar dari sisi reader.
+- **Pesan error tidak bisa dipakai sebagai diagnosis:** berkas hilang, path yang ternyata folder, dan pattern yang
+  tidak cocok membalas kalimat yang sama persis. Ini memotong rencana M3: pre-flight harus `os.Stat` + `DESCRIBE`
+  di Go, bukan membaca error engine.
+
+Aturan yang dipasang (semuanya di `backend/engine/duckdb/`):
+
+- `filesource_path.go` baru — `CanonicalFileSourcePath(path, anchorDir)` untuk **menyimpan** (berkas di dalam folder
+  bundle jadi `data/orders.csv`, slash, dinormalisasi; berkas di luar tetap absolut dan **tidak** ditulis ulang jadi
+  `../…`, supaya definisinya jujur bilang "ini milik mesin ini") dan `ResolveFileSourcePath(stored, anchorDir)` untuk
+  **membuka** (absolut dibersihkan, relatif digabung lalu diuji tidak keluar → `ErrFileSourceOutsideAnchor`).
+  `anchorDir` kosong berarti "tidak ada bundle" (jalur web hari ini): hanya absolut yang diterima, **tidak pernah**
+  resolve terhadap CWD.
+- `FileSourceQuery` menolak karakter glob dengan `ErrFileSourceGlobPattern` — satu titik, jadi kedua produk ikut
+  aman tanpa menyentuh `RegisterFileSource` masing-masing.
+- `~` ditolak oleh kedua arah resolver, dan hanya sebagai segmen pertama: `data/~notes.csv` tetap nama berkas biasa.
+- "Absolut" dikenali di **setiap** platform (`C:\…`, `C:/…`, `\\server\…`), karena `filepath.IsAbs` hanya menjawab
+  untuk platform tempat binernya dikompilasi — kalau tidak, bundle tulisan Windows terlihat relatif lalu dijumlahkan
+  ke folder bundle. Sebaliknya `data\orders.csv` di Unix memang jadi satu nama yang tidak ada: nasib "bisa ditunjuk
+  ulang", bukan path yang dilempar ke `Dir`.
+
+**Bukti:** `filesource_path_test.go` (aturan, jalan di `CGO_ENABLED=1` **dan** `=0` karena tidak butuh DuckDB) +
+`filesource_path_cgo_test.go` (empat perilaku di atas diulang pada reader sungguhan, jadi upgrade DuckDB gagal di tes
+bukan diam-diam membaca berkas yang salah). Konsumen keduanya ikut membuktikan bentuk nyata janji §5.5:
+`TestBundleRelativeSourceSurvivesTheFolderMoving` di desktop menyimpan `data/orders.csv`, membaca 6 baris di folder
+pertama lalu jumlah yang sama dari temp root lain, dan menguji penolakan `../orders.csv` terhadap berkas yang **memang
+ada**. Yang belum terukur di mesin ini: bundle yang benar-benar ditulis di Windows (butuh mesin Windows) dan batas
+jumlah/ukuran berkas per bundle (M3, dari angka nyata).
 
 
 ---

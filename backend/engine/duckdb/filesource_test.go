@@ -41,6 +41,20 @@ func TestFileSourceQueryRejectsWhatDuckDBHasNoCoreReaderFor(t *testing.T) {
 	}
 }
 
+// A glob character in a stored path is not cosmetic: the readers match the
+// pattern, so "orders*.csv" is a different (larger) answer than the one the
+// definition names. See filesource_path_cgo_test.go for the measured read.
+func TestFileSourceQueryRefusesGlobPatterns(t *testing.T) {
+	for _, path := range []string{
+		"data/orders*.csv", "data/orders?.csv", "data/orders[1].csv",
+		"/mnt/share/*.parquet", `C:\data\orders?.json`,
+	} {
+		if _, err := FileSourceQuery(path); !errors.Is(err, ErrFileSourceGlobPattern) {
+			t.Errorf("%q returned %v, want ErrFileSourceGlobPattern", path, err)
+		}
+	}
+}
+
 // The path becomes a SQL string literal, so a quote in a filename must not be
 // able to end it and start a second argument.
 func TestFileSourceQueryEscapesQuotesInPath(t *testing.T) {
