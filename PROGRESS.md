@@ -682,6 +682,19 @@ pertama lalu jumlah yang sama dari temp root lain, dan menguji penolakan `../ord
 ada**. Yang belum terukur di mesin ini: bundle yang benar-benar ditulis di Windows (butuh mesin Windows) dan batas
 jumlah/ukuran berkas per bundle (M3, dari angka nyata).
 
+**Update 2026-11-02, konsumen kedua sekarang memanggil resolvernya sendiri.** Desktop membuka milestone M3 dengan
+`internal/bundle/` — store `.muara` (zip berisi 7 entri JSON) yang memanggil `CanonicalFileSourcePath` saat menyimpan
+dan `ResolveFileSourcePath` saat membuka, dengan anchor = folder berkas `.muara`. Dua hal yang perlu dicatat dari
+sisi web karena aturannya bersama:
+
+- Store desktop **tidak** menduplikasi aturan path — `~/…` dan `../…` yang ditemukan di dalam berkas orang lain
+  ditolak dengan error engine, disebut nama aliasnya. Kalau web kelak menerima unggahan berkas dan menyimpan
+  path, pola yang sama berlaku: `anchorDir` kosong berarti hanya absolut, dan web tidak pernah resolve ke CWD.
+- Sebagian dari "batas ukuran" akhirnya punya angka: bundle kosong **1189 byte**, dan 1000 View berisi
+  `builder_state` + `raw_sql` yang berbeda-beda = **625 KB** `views.json` tak terkompresi → **16 KB** di dalam zip.
+  Definisi itu murah; yang menentukan ukuran bundel adalah berkas data di *samping* `.muara`. Engine tidak disentuh
+  sama sekali oleh butir ini, jadi tidak ada angka di repo web yang berubah.
+
 
 ---
 
