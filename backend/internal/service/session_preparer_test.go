@@ -28,7 +28,12 @@ func TestMongoURIPrefersStoredConnectionString(t *testing.T) {
 		Host: "ignored",
 		Port: 1234,
 	}
-	if got := mongoURI(cfg); got != cfg.URI {
+	got, err := mongoURI(cfg)
+	if err != nil {
+		t.Fatalf("mongoURI: %v", err)
+	}
+	// A profile that names no TLS wish must reach the driver exactly as saved.
+	if got != cfg.URI {
 		t.Errorf("mongoURI() = %q, want the stored URI", got)
 	}
 }
@@ -41,7 +46,11 @@ func TestMongoURIEscapesCredentials(t *testing.T) {
 		Password: "p@ss:w/ord?",
 	}
 
-	parsed, err := url.Parse(mongoURI(cfg))
+	uri, err := mongoURI(cfg)
+	if err != nil {
+		t.Fatalf("mongoURI: %v", err)
+	}
+	parsed, err := url.Parse(uri)
 	if err != nil {
 		t.Fatalf("generated URI does not parse: %v", err)
 	}
@@ -64,9 +73,121 @@ func TestMongoURIEscapesCredentials(t *testing.T) {
 func TestMongoURIEmptyWithoutHost(t *testing.T) {
 	// StreamMongoCollections reports a clear "needs a URI" error instead of
 	// dialing an empty string and timing out.
-	if got := mongoURI(&entity.ConnectionConfig{Database: "sample_analytics"}); got != "" {
-		t.Errorf("mongoURI() = %q, want empty", got)
+	got, err := mongoURI(&entity.ConnectionConfig{Database: "sample_analytics"})
+	if err != nil || got != "" {
+		t.Errorf("mongoURI() = %q, err = %v, want empty", got, err)
 	}
+}
+
+// The CA reaches the Go driver as tlsCAFile — and only together with TLS, since
+// a measured CA file that is loaded while tls=false verifies nothing.
+func TestMongoURIAddsTLSToTheCASavedOnTheProfile(t *testing.T) {
+	ca := "/etc/ssl/certs/internal-ca.pem"
+	cases := []struct {
+		name string
+		cfg  *entity.ConnectionConfig
+	}{
+		{"host fields", &entity.ConnectionConfig{
+			Host: "mongo.internal", Port: 27017, User: "reader", Password: "pw",
+			SSLMode: "verify-ca", RootCert: ca,
+		}},
+		{"stored uri", &entity.ConnectionConfig{
+			URI:      "mongodb://reader:pw@mongo.internal:27017/admin?replicaSet=rs0",
+			SSLMode:  "verify-full",
+			RootCert: ca,
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			uri, err := mongoURI(c.cfg)
+			if err != nil {
+				t.Fatalf("mongoURI: %v", err)
+			}
+			q := mustURL(t, uri).Query()
+			if q.Get("tlsCAFile") != ca {
+				t.Errorf("tlsCAFile = %q in %q, want %q", q.Get("tlsCAFile"), uri, ca)
+			}
+			if q.Get("tls") != "true" {
+				t.Errorf("tls = %q, want true — a CA without TLS verifies nothing", q.Get("tls"))
+			}
+			// Whatever the profile already carried must survive the merge.
+			if c.cfg.URI != "" && q.Get("replicaSet") != "rs0" {
+				t.Errorf("replicaSet lost from the stored uri: %q", uri)
+			}
+			if c.cfg.Host != "" && q.Get("authSource") != "admin" {
+				t.Errorf("authSource lost when TLS is added: %q", uri)
+			}
+		})
+	}
+}
+
+// Two sources of truth for one CA is the failure mode this whole change is about:
+// the driver reads tlsCAFile and silently ignores sslCAFile.
+func TestMongoURIRefusesAConflictingCA(t *testing.T) {
+	ca := "/etc/ssl/certs/internal-ca.pem"
+	cases := []struct {
+		name    string
+		uri     string
+		wantSub string
+	}{
+		{"other ca in uri", "mongodb://mongo.internal:27017/?tlsCAFile=/etc/other-ca.pem", "conflicts"},
+		{"legacy name ignored", "mongodb://mongo.internal:27017/?sslCAFile=/etc/other-ca.pem", "ignores"},
+		{"tls off", "mongodb://mongo.internal:27017/?tls=false", "tls=false"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := mongoURI(&entity.ConnectionConfig{
+				URI: c.uri, SSLMode: "verify-ca", RootCert: ca,
+			})
+			if err == nil {
+				t.Fatalf("accepted %q together with root_cert %q", c.uri, ca)
+			}
+			if !strings.Contains(err.Error(), c.wantSub) {
+				t.Errorf("error = %q, want it to mention %q", err, c.wantSub)
+			}
+		})
+	}
+}
+
+// The UI posts ssl_mode "prefer" for every driver, and the form already did before
+// any of this existed. A fallback mode therefore has to keep the source plain
+// instead of failing or silently upgrading to TLS — the one thing it may not do is
+// sit next to a CA, because then the profile looks verified while nothing checks.
+func TestMongoURILeavesFallbackModesPlainButRefusesACA(t *testing.T) {
+	ca := "/etc/ssl/certs/internal-ca.pem"
+	for _, mode := range []string{"", "disable", "allow", "prefer"} {
+		uri, err := mongoURI(&entity.ConnectionConfig{
+			Host: "mongo.internal", Port: 27017, SSLMode: mode,
+		})
+		if err != nil {
+			t.Errorf("ssl_mode %q refused: %v", mode, err)
+			continue
+		}
+		if q := mustURL(t, uri).Query(); q.Has("tls") || q.Has("tlsCAFile") {
+			t.Errorf("ssl_mode %q produced TLS in %q, so a plain source would stop working", mode, uri)
+		}
+
+		if _, err := mongoURI(&entity.ConnectionConfig{
+			Host: "mongo.internal", Port: 27017, SSLMode: mode, RootCert: ca,
+		}); err == nil {
+			t.Errorf("ssl_mode %q + root_cert accepted: the CA would be stored and used for nothing", mode)
+		}
+	}
+
+	if _, err := mongoURI(&entity.ConnectionConfig{
+		Host: "mongo.internal", Port: 27017, SSLMode: "bogus",
+	}); err == nil {
+		t.Error("an unrecognised ssl_mode was accepted for mongodb")
+	}
+}
+
+func mustURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %q: %v", raw, err)
+	}
+	return parsed
 }
 
 func TestPostgresDSNDefaultsSSLModeOnce(t *testing.T) {
@@ -420,21 +541,51 @@ func TestAttachConnectionRefusesAnUnusableMySQLSource(t *testing.T) {
 	}
 }
 
-func TestCheckRootCertDriver(t *testing.T) {
-	if err := checkRootCertDriver("postgres", "/etc/ssl/certs/internal-ca.pem"); err != nil {
-		t.Errorf("postgres with a CA path: %v", err)
+// Each connector has its own rule about when a CA file is read, so the write
+// point has to ask the connector rather than assume libpq's answer.
+func TestNormalizeStoredRootCert(t *testing.T) {
+	ca := "/etc/ssl/certs/internal-ca.pem"
+
+	// postgres: the CA is opened only by the verify modes.
+	if got, err := normalizeStoredRootCert("postgres", ca, "verify-full"); err != nil || got != ca {
+		t.Errorf("postgres verify-full = %q, %v", got, err)
 	}
-	// No path means nothing to check; normalizeSSLMode/normalizeRootCert own the rest.
-	for _, driver := range []string{"mysql", "mongodb", "sqlite"} {
-		if err := checkRootCertDriver(driver, ""); err != nil {
-			t.Errorf("%s without a CA path: %v", driver, err)
+	if got, err := normalizeStoredRootCert("postgres", ca, "require"); err == nil || got != "" {
+		t.Errorf("postgres require accepted (%q, %v), and libpq would ignore the file", got, err)
+	}
+
+	// mongodb: any mode that turns TLS on is enough, because the driver always
+	// verifies when tls is true.
+	for _, mode := range []string{"require", "verify-ca", "verify-full"} {
+		if got, err := normalizeStoredRootCert("mongodb", ca, mode); err != nil || got != ca {
+			t.Errorf("mongodb %s = %q, %v", mode, got, err)
 		}
 	}
-	err := checkRootCertDriver("mysql", "/etc/ssl/certs/internal-ca.pem")
-	if err == nil {
-		t.Fatal("a CA path on a mysql profile was accepted, so it would be stored and ignored")
+	// A fallback mode asks for no TLS, so it cannot carry a CA either.
+	for _, mode := range []string{"disable", "allow", "prefer"} {
+		if got, err := normalizeStoredRootCert("mongodb", ca, mode); err == nil || got != "" {
+			t.Errorf("mongodb %s accepted a CA (%q, %v) while asking for no TLS", mode, got, err)
+		}
 	}
-	if !strings.Contains(err.Error(), "mysql") {
+
+	// No path means nothing to check, on every driver.
+	for _, driver := range []string{"postgres", "mongodb", "mysql", "sqlite"} {
+		if got, err := normalizeStoredRootCert(driver, "", "disable"); err != nil || got != "" {
+			t.Errorf("%s without a CA path: %q, %v", driver, got, err)
+		}
+	}
+
+	// mysql_scanner has no TLS keyword at all, so a stored path would be ignored.
+	if got, err := normalizeStoredRootCert("mysql", ca, "verify-full"); err == nil || got != "" {
+		t.Fatalf("a CA path on a mysql profile was accepted (%q, %v)", got, err)
+	} else if !strings.Contains(err.Error(), "mysql") {
 		t.Errorf("error = %q, want it to name the driver that cannot read the file", err)
+	}
+
+	// The path rules are shared, so they bite on both capable drivers.
+	for _, driver := range []string{"postgres", "mongodb"} {
+		if _, err := normalizeStoredRootCert(driver, "certs/internal-ca.pem", "verify-ca"); err == nil {
+			t.Errorf("%s accepted a relative CA path", driver)
+		}
 	}
 }

@@ -338,6 +338,38 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   butuh server MySQL sungguhan. **Gerbang empat-mode** (engine+web × `CGO_ENABLED=1/0`:
   `build`+`vet`+`test`) hijau, `gofmt -l` bersih.
 
+### CA privat untuk MongoDB — `root_cert` jadi `tlsCAFile` (2026-11-02)
+- **Kenapa ini bisa padahal MySQL tidak:** Mongo tidak lewat DuckDB. `StreamMongoCollections` memanggil
+  `mongo.Connect` dengan driver Go, dan driver itu punya kata kunci untuk CA. Jadi jalur yang sama
+  (`root_cert` di profil) sekarang berlaku untuk dua driver, masing-masing dengan aturan connectornya sendiri.
+- **Yang diukur (mongo-driver v1.17.10, alamat mati `127.0.0.1:1` — berkas sertifikat dibuka *sebelum* server
+  disentuh, jadi tidak perlu server TLS):**
+  - `tlsCAFile=<berkas hilang>` → `open …: no such file or directory` = **benar-benar dibaca**.
+  - `sslCAFile=<berkas hilang>` → **tanpa error sama sekali**: nama warisan itu **diam-diam diabaikan** driver.
+    Inilah alasan `withMongoTLS` menolak URI yang masih memakai `sslCAFile` — profil semacam itu terlihat
+    terverifikasi padahal tidak ada yang diperiksa.
+  - `tlsCAFile=` (kosong) → `open : no such file` — kunci yang tidak dipakai harus **dihilangkan**, sama seperti
+    pelajaran `passwd=` di MySQL.
+  - Nama yang tidak dikenal (`bogusCAFile`) juga diterima diam-diam: driver **tidak** memvalidasi opsi URI, jadi
+    satu-satunya bukti yang sah adalah berkasnya benar-benar dibuka.
+- **Pemetaan `ssl_mode`:** driver ini hanya bisa "TLS nyala / mati". `require`, `verify-ca`, `verify-full` →
+  `tls=true` (+`tlsCAFile`); `disable` **dan** fallback libpq `allow`/`prefer` → tetap polos. Fallback sengaja
+  tidak dipaksa jadi TLS karena **form frontend mengirim `ssl_mode: "prefer"` untuk semua driver** — menolak
+  atau memetakan fallback ke TLS akan membuat profil Mongo yang hari ini jalan jadi gagal. Yang tidak boleh
+  adalah CA pendamping mode tanpa TLS: itu ditolak dengan pesan yang menyebut pilihan mode yang benar.
+- **Titik tulis sekarang bertanya ke connector-nya masing-masing** (`normalizeStoredRootCert` menggantikan
+  `checkRootCertDriver`): postgres pakai gerbang mode libpq, mongodb pakai gerbang TLS driver, sisanya ditolak
+  dengan alasan. `normalizeSSLMode` (enam nama libpq) tetap dipakai untuk semua driver — dia hanya menolak
+  typo, bukan memetakan makna.
+- **Tes:** `TestMongoURIAddsTLSToTheCASavedOnTheProfile` (dua bentuk: host fields & stored URI, memastikan
+  `replicaSet`/`authSource` tidak hilang saat penggabungan), `TestMongoURIRefusesAConflictingCA` (CA lain di URI,
+  `sslCAFile` warisan, `tls=false`), `TestMongoURILeavesFallbackModesPlainButRefusesACA`,
+  `TestNormalizeStoredRootCert`, dan bukti driver-level di engine
+  (`TestMongoDriverOpensTLSCAFileButNotSSLCaFile`). Tiga pemanggil `mongoURI` ikut disesuaikan
+  (`attachConnection`, `TestConnection`, `redactCredentials`) karena fungsinya kini mengembalikan error.
+  Belum diuji end-to-end terhadap server Mongo bersertifikat — infra milik user; sample mongo lokal tidak
+  ber-TLS dan tetap memakai jalur polos, jadi tidak ada perubahan perilaku bagi stack yang berjalan.
+
 ---
 
 ## 4. Phase-by-Phase Execution Checklist

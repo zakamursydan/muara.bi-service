@@ -1,6 +1,9 @@
 package duckdb
 
 import (
+	"context"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -119,5 +122,34 @@ func TestStreamMongoCollectionsRejectsIncompleteConfig(t *testing.T) {
 		if _, err := StreamMongoCollections(t.Context(), nil, cfg); err == nil {
 			t.Errorf("expected config error for %+v", cfg)
 		}
+	}
+}
+
+// The product hands the driver a CA path as tlsCAFile, and "the driver reads that
+// key" is a claim about the driver, not about our string building. It is measured
+// against 127.0.0.1:1 (nothing listens) because the certificate file is opened
+// before the server is ever reached — no TLS server needed. The legacy name
+// sslCAFile is the reason this test exists: the driver ignores it silently, so a
+// profile using it looks configured while nothing is verified.
+func TestMongoDriverOpensTLSCAFileButNotSSLCaFile(t *testing.T) {
+	ctx := context.Background()
+	absent := filepath.Join(t.TempDir(), "absent-ca.pem")
+
+	_, err := connectMongo(ctx, "mongodb://127.0.0.1:1/?tls=true&tlsCAFile="+absent+"&serverSelectionTimeoutMS=400", 3)
+	if err == nil || !strings.Contains(err.Error(), "no such file") {
+		t.Errorf("tlsCAFile was not opened by the driver: %v", err)
+	}
+
+	// An empty value is a failure too, so a profile must omit the key instead.
+	if _, err := connectMongo(ctx, "mongodb://127.0.0.1:1/?tls=true&tlsCAFile=&serverSelectionTimeoutMS=400", 3); err == nil {
+		t.Error("an empty tlsCAFile= was accepted, so it would be an error at connect time")
+	}
+
+	// The legacy name must stay unverified-but-observed: if a future driver ever
+	// starts reading it, the log line says so instead of the product guessing.
+	if client, err := connectMongo(ctx, "mongodb://127.0.0.1:1/?tls=true&sslCAFile="+absent+"&serverSelectionTimeoutMS=400", 3); err != nil {
+		t.Logf("sslCAFile behaviour changed: %v", err)
+	} else if client != nil {
+		_ = client.Disconnect(context.Background())
 	}
 }

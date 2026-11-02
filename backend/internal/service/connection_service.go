@@ -166,14 +166,11 @@ func (s *ConnectionService) UpsertEnvironment(ctx context.Context, wsID, connID 
 	}
 	req.SSLMode = sslMode
 
-	// A CA path is checked against the mode that would read it, at the same
-	// point: an unusable combination saved here would only appear later as a
-	// TLS error at ATTACH time, in a different process, with no hint that the
-	// profile itself was the problem.
-	if err := checkRootCertDriver(conn.DriverType, req.RootCert); err != nil {
-		return nil, customerror.NewBadRequestError(err.Error(), err)
-	}
-	rootCert, err := normalizeRootCert(req.RootCert, sslMode)
+	// A CA path is checked against the connector and the mode that would read it,
+	// at the same point: an unusable combination saved here would only appear
+	// later as a TLS error at ATTACH time, in a different process, with no hint
+	// that the profile itself was the problem.
+	rootCert, err := normalizeStoredRootCert(conn.DriverType, req.RootCert, sslMode)
 	if err != nil {
 		return nil, customerror.NewBadRequestError(err.Error(), err)
 	}
@@ -248,7 +245,14 @@ func (s *ConnectionService) TestConnection(ctx context.Context, wsID, connID, en
 	// host:port dial below would dial ":0", and a TCP connect would also pass
 	// for a server that then rejects the credentials — so ping with the driver.
 	if conn.DriverType == "mongodb" {
-		uri := mongoURI(cfg)
+		uri, err := mongoURI(cfg)
+		if err != nil {
+			return &response.TestConnectionResponse{
+				Success:   false,
+				Message:   redactCredentials(err.Error(), cfg),
+				LatencyMs: time.Since(start).Milliseconds(),
+			}, nil
+		}
 		if uri == "" {
 			return &response.TestConnectionResponse{
 				Success:   false,
@@ -319,7 +323,7 @@ func redactCredentials(msg string, cfg *entity.ConnectionConfig) string {
 	if cfg.Password != "" {
 		msg = strings.ReplaceAll(msg, cfg.Password, "<redacted>")
 	}
-	if uri := mongoURI(cfg); uri != "" {
+	if uri, err := mongoURI(cfg); err == nil && uri != "" {
 		parsed, err := url.Parse(uri)
 		if err == nil && parsed.User != nil {
 			msg = strings.ReplaceAll(msg, parsed.User.String(), "<credentials>")

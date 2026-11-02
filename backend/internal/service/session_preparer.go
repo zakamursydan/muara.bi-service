@@ -227,8 +227,12 @@ func attachConnection(ctx context.Context, session duckdb.Session, conn entity.D
 	case "sqlite":
 		return nil, session.AttachSQLite(ctx, conn.AliasName, cfg.Database)
 	case "mongodb":
+		uri, err := mongoURI(cfg)
+		if err != nil {
+			return nil, err
+		}
 		mounts, err := duckdb.StreamMongoCollections(ctx, session, duckdb.MongoCollectionStream{
-			URI:      mongoURI(cfg),
+			URI:      uri,
 			Database: cfg.Database,
 			Alias:    conn.AliasName,
 		})
@@ -249,26 +253,111 @@ func attachConnection(ctx context.Context, session duckdb.Session, conn entity.D
 // mongoURI prefers the stored connection string and falls back to the host fields.
 // The root MongoDB user lives in `admin`, so authentication is pointed there unless
 // the URI already says otherwise.
-func mongoURI(cfg *entity.ConnectionConfig) string {
-	if cfg.URI != "" {
-		return cfg.URI
+func mongoURI(cfg *entity.ConnectionConfig) (string, error) {
+	tlsOn, err := mongoTLSRequested(cfg.SSLMode)
+	if err != nil {
+		return "", err
 	}
-	if cfg.Host == "" || cfg.Port == 0 {
-		return ""
+	ca, err := mongoRootCert(cfg.RootCert, tlsOn)
+	if err != nil {
+		return "", err
 	}
 
-	uri := url.URL{
-		Scheme: "mongodb",
-		Host:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		RawQuery: url.Values{
-			"authSource":       []string{"admin"},
-			"directConnection": []string{"true"},
-		}.Encode(),
+	base := cfg.URI
+	if base == "" {
+		if cfg.Host == "" || cfg.Port == 0 {
+			return "", nil
+		}
+		uri := url.URL{
+			Scheme: "mongodb",
+			Host:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+			RawQuery: url.Values{
+				"authSource":       []string{"admin"},
+				"directConnection": []string{"true"},
+			}.Encode(),
+		}
+		if cfg.User != "" {
+			uri.User = url.UserPassword(cfg.User, cfg.Password)
+		}
+		base = uri.String()
 	}
-	if cfg.User != "" {
-		uri.User = url.UserPassword(cfg.User, cfg.Password)
+
+	// Profiles saved before any of this existed carry no TLS wish at all, and
+	// rewriting their URI string would change what the operator sees.
+	if !tlsOn && ca == "" {
+		return base, nil
 	}
-	return uri.String()
+	return withMongoTLS(base, ca)
+}
+
+// mongoTLSRequested maps the stored ssl_mode onto the one thing the Go driver can
+// express: TLS on or off. `allow` and `prefer` are libpq fallbacks with no driver
+// equivalent, and they are left on the plain side rather than guessed — turning a
+// working plaintext source into a failing TLS one is not an improvement the operator
+// asked for. What is *not* allowed is keeping a CA next to them, which is where the
+// fallback stops being harmless: the file would sit in the profile doing nothing.
+func mongoTLSRequested(raw string) (bool, error) {
+	switch mode := strings.TrimSpace(raw); mode {
+	case "", "disable", "allow", "prefer":
+		return false, nil
+	case "require", "verify-ca", "verify-full":
+		return true, nil
+	default:
+		return false, fmt.Errorf("ssl_mode %q is not a mode the mongodb driver can be given (want disable, allow, prefer, require, verify-ca or verify-full)", raw)
+	}
+}
+
+// mongoRootCert is the CA file handed to the driver as tlsCAFile. Measured against
+// mongo-driver v1.17.10 (2026-11-02): the named file is opened even when tls is
+// off, an empty tlsCAFile= is a failure ("open : no such file"), and the legacy
+// sslCAFile is ignored completely — so a CA is only accepted together with TLS.
+func mongoRootCert(raw string, tlsOn bool) (string, error) {
+	path, err := rootCertPath(raw)
+	if err != nil || path == "" {
+		return path, err
+	}
+	if !tlsOn {
+		return "", fmt.Errorf("root_cert has no effect while ssl_mode asks for no TLS: the driver would load the file and verify nothing (set ssl_mode to require, verify-ca or verify-full)")
+	}
+	return path, nil
+}
+
+// withMongoTLS adds the TLS wishes to one URI without touching anything else in
+// it, because a stored URI may already carry authentication options the product
+// must not overwrite.
+func withMongoTLS(rawURI, caPath string) (string, error) {
+	parsed, err := url.Parse(rawURI)
+	if err != nil {
+		return "", fmt.Errorf("mongodb uri cannot be parsed: %w", err)
+	}
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return "", fmt.Errorf("mongodb uri query cannot be parsed: %w", err)
+	}
+
+	// The driver ignores sslCAFile silently, so a profile that names the CA twice
+	// — once in the URI under a key nobody reads, once in root_cert — must fail
+	// here instead of trusting whichever one the driver happens to look at.
+	for _, key := range []string{"sslCAFile", "sslCaFile"} {
+		if query.Get(key) != "" {
+			return "", fmt.Errorf("mongodb uri sets %s, which the Go driver ignores; drop it and put the CA path in root_cert", key)
+		}
+	}
+	if existing := query.Get("tlsCAFile"); existing != "" && existing != caPath {
+		return "", fmt.Errorf("mongodb uri already names tlsCAFile %q, which conflicts with root_cert %q", existing, caPath)
+	}
+	for _, key := range []string{"ssl", "tls"} {
+		if v := query.Get(key); v != "" && v != "true" && caPath != "" {
+			return "", fmt.Errorf("mongodb uri sets %s=%s while root_cert is configured: TLS would be off, so the CA cannot verify anything", key, v)
+		}
+	}
+
+	query.Set("tls", "true")
+	if caPath != "" {
+		query.Set("tlsCAFile", caPath)
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
 }
 
 // postgresSSLModes is the closed set of sslmode values libpq accepts. Anything
@@ -298,24 +387,37 @@ func normalizeSSLMode(raw string) (string, error) {
 // it would look like verification while nothing is checked.
 var postgresVerifyModes = []string{"verify-ca", "verify-full"}
 
-// checkRootCertDriver rejects a CA path on a driver whose connector cannot read
-// one, before it is encrypted and stored. mysql_scanner was measured (2026-11-02,
-// against DuckDB 1.1.3) to accept exactly host, port, user, passwd, db and socket:
+// normalizeStoredRootCert applies the rules of the connector that would actually
+// read the file, at the point the profile is written. mysql_scanner was measured
+// (2026-11-02, DuckDB 1.1.3) to know only host, port, user, passwd, db and socket —
 // ssl-ca, ssl-capath and ssl-mode all come back as "Unrecognized configuration
-// parameter", and credentials cannot be passed as ATTACH options at all. Saving a
-// path there would advertise a verified TLS profile that is still unencrypted.
-func checkRootCertDriver(driverType, raw string) error {
-	if strings.TrimSpace(raw) == "" || driverType == "postgres" {
-		return nil
+// parameter" and credentials cannot travel as ATTACH options — so a CA path there
+// would be encrypted, stored, and quietly ignored.
+func normalizeStoredRootCert(driverType, raw, sslMode string) (string, error) {
+	switch driverType {
+	case "postgres":
+		// libpq opens the CA only for verify-ca / verify-full.
+		return normalizeRootCert(raw, sslMode)
+	case "mongodb":
+		// The Go driver loads tlsCAFile whenever TLS is on, and never when it is off.
+		tlsOn, err := mongoTLSRequested(sslMode)
+		if err != nil {
+			return "", err
+		}
+		return mongoRootCert(raw, tlsOn)
+	default:
+		if strings.TrimSpace(raw) == "" {
+			return "", nil
+		}
+		return "", fmt.Errorf("root_cert is not read by the %s connector: only postgres (sslrootcert) and mongodb (tlsCAFile) accept a CA file", driverType)
 	}
-	return fmt.Errorf("root_cert is only read by postgres: the %s connector has no option for a CA file", driverType)
 }
 
-// normalizeRootCert validates a stored CA path against the mode that would use
-// it. libpq opens the certificate from a file, so a relative path resolves
-// against whatever working directory the process happens to have: two
-// environments would load two different CAs from the same profile.
-func normalizeRootCert(raw, sslMode string) (string, error) {
+// rootCertPath holds the two checks every driver needs, because both of them
+// open the certificate from a file: a relative path resolves against whatever
+// working directory the process happens to have, so two environments would load
+// two different CAs from one profile, and pasted PEM text is never a path.
+func rootCertPath(raw string) (string, error) {
 	path := strings.TrimSpace(raw)
 	if path == "" {
 		return "", nil
@@ -325,6 +427,16 @@ func normalizeRootCert(raw, sslMode string) (string, error) {
 	}
 	if !filepath.IsAbs(path) {
 		return "", fmt.Errorf("root_cert %q must be an absolute path — a relative one is resolved against the server's working directory", path)
+	}
+	return path, nil
+}
+
+// normalizeRootCert validates a stored CA path against the libpq mode that would
+// read it.
+func normalizeRootCert(raw, sslMode string) (string, error) {
+	path, err := rootCertPath(raw)
+	if err != nil || path == "" {
+		return path, err
 	}
 	for _, allowed := range postgresVerifyModes {
 		if sslMode == allowed {
