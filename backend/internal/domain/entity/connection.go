@@ -23,6 +23,7 @@ type ConnectionConfig struct {
 	User      string         `json:"user"`
 	Password  string         `json:"password"`
 	SSLMode   string         `json:"ssl_mode,omitempty"`
+	RootCert  string         `json:"root_cert,omitempty"`
 	URI       string         `json:"uri,omitempty"` // For MongoDB / Cloud connections
 	SSHTunnel *SSHConfigJSON `json:"ssh_tunnel,omitempty"`
 }

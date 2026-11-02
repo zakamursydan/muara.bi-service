@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"strings"
 
 	"muara.bi/core/internal/domain/entity"
@@ -280,6 +281,35 @@ func normalizeSSLMode(raw string) (string, error) {
 		raw, strings.Join(postgresSSLModes, ", "))
 }
 
+// postgresVerifyModes are the sslmode values where libpq actually reads a CA
+// file. "require" negotiates TLS but accepts any certificate, so a CA saved with
+// it would look like verification while nothing is checked.
+var postgresVerifyModes = []string{"verify-ca", "verify-full"}
+
+// normalizeRootCert validates a stored CA path against the mode that would use
+// it. libpq opens the certificate from a file, so a relative path resolves
+// against whatever working directory the process happens to have: two
+// environments would load two different CAs from the same profile.
+func normalizeRootCert(raw, sslMode string) (string, error) {
+	path := strings.TrimSpace(raw)
+	if path == "" {
+		return "", nil
+	}
+	if strings.ContainsAny(path, "\n\x00") {
+		return "", fmt.Errorf("root_cert must be a path, not certificate text (want the PEM file, e.g. /etc/ssl/certs/internal-ca.pem)")
+	}
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("root_cert %q must be an absolute path — a relative one is resolved against the server's working directory", path)
+	}
+	for _, allowed := range postgresVerifyModes {
+		if sslMode == allowed {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("root_cert has no effect while ssl_mode is %q: the CA is only read by %s",
+		sslMode, strings.Join(postgresVerifyModes, " or "))
+}
+
 // postgresDSN builds the libpq conninfo used by both schema discovery and the
 // DuckDB ATTACH. sslmode is defaulted in this one place: an empty value produced
 // `sslmode= sslmode=disable` before, and pgx rejects that with
@@ -290,9 +320,21 @@ func postgresDSN(cfg *entity.ConnectionConfig) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+	rootCert, err := normalizeRootCert(cfg.RootCert, sslMode)
+	if err != nil {
+		return "", err
+	}
+
+	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		dsnValue(cfg.Host), cfg.Port, dsnValue(cfg.User), dsnValue(cfg.Password),
-		dsnValue(cfg.Database), dsnValue(sslMode)), nil
+		dsnValue(cfg.Database), dsnValue(sslMode))
+	if rootCert == "" {
+		return dsn, nil
+	}
+	// sslrootcert, not rootcert: the keyword DuckDB's bundled libpq knows was
+	// measured on this engine, and "rootcert" fails as `invalid connection
+	// option` — the same message a made-up option produces.
+	return dsn + " sslrootcert=" + dsnValue(rootCert), nil
 }
 
 // dsnValue quotes one libpq keyword=value entry. Credentials are user supplied,

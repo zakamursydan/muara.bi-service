@@ -21,6 +21,10 @@ type UpsertEnvironmentRequest struct {
 	User     string `json:"user"`
 	Password string `json:"password"`
 	SSLMode  string `json:"ssl_mode"`
+	// RootCert is the absolute path of the CA that signed the source's server
+	// certificate. Internal databases are usually self-signed, where sslmode
+	// alone cannot verify anything.
+	RootCert string `json:"root_cert"`
 	URI      string `json:"uri"`
 
 	// Collapsible Optional SSH Bastion Jump Host

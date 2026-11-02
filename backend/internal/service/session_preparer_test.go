@@ -1,9 +1,19 @@
 package service
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -203,5 +213,142 @@ func TestPostgresDSNRejectsUnknownSSLMode(t *testing.T) {
 		Host: "dwh.internal", Port: 5432, User: "reader", Database: "sales", SSLMode: "verify",
 	}); err == nil {
 		t.Fatal("an unrecognised ssl_mode must fail loudly, not fall back to another mode")
+	}
+}
+
+// writeTestCA makes a self-signed CA file. The test needs a real file because
+// the only way to tell "libpq read this parameter" from "libpq ignored it" is
+// whether the certificate pool ends up populated.
+func writeTestCA(t *testing.T) string {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "muara test ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	block := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if err := os.WriteFile(path, block, 0o600); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+	return path
+}
+
+// The keyword that reaches libpq is sslrootcert. DuckDB's own scanner was
+// measured on 2026-11-02: `rootcert=` fails as `invalid connection option`, the
+// same message a made-up option produces — so the spelling is asserted here
+// rather than trusted from the product's own field name.
+func TestPostgresDSNCarriesTheCAFileToLibpq(t *testing.T) {
+	ca := writeTestCA(t)
+
+	for _, mode := range postgresVerifyModes {
+		dsn := mustDSN(t, &entity.ConnectionConfig{
+			Host: "dwh.internal", Port: 5432, User: "reader", Password: "s3cret",
+			Database: "sales", SSLMode: mode, RootCert: ca,
+		})
+		if n := strings.Count(dsn, "sslrootcert="); n != 1 {
+			t.Fatalf("%s: dsn = %q, want exactly one sslrootcert, got %d", mode, dsn, n)
+		}
+		if strings.Contains(dsn, " rootcert=") {
+			t.Errorf("%s: emitted the legacy spelling that libpq rejects: %q", mode, dsn)
+		}
+
+		parsed, err := pgx.ParseConfig(dsn)
+		if err != nil {
+			t.Fatalf("%s: pgx rejects the generated dsn: %v", mode, err)
+		}
+		if parsed.TLSConfig == nil || parsed.TLSConfig.RootCAs == nil {
+			t.Errorf("%s: the CA never reached the TLS config", mode)
+		}
+	}
+}
+
+// require negotiates TLS but accepts any certificate, and disable turns TLS off
+// entirely. Saving a CA with either would make a profile look verified while
+// nothing is checked, which is the failure this repo was bitten by once already.
+func TestPostgresDSNRefusesARootCertTheModeWouldNotRead(t *testing.T) {
+	ca := writeTestCA(t)
+	for _, mode := range []string{"", "disable", "allow", "prefer", "require"} {
+		if _, err := postgresDSN(&entity.ConnectionConfig{
+			Host: "dwh.internal", Port: 5432, User: "reader", Database: "sales",
+			SSLMode: mode, RootCert: ca,
+		}); err == nil {
+			t.Errorf("ssl_mode %q accepted a CA it will never read", mode)
+		}
+	}
+}
+
+func TestNormalizeRootCertRejectsUnusablePaths(t *testing.T) {
+	for _, bad := range []string{
+		"certs/ca.pem",   // relative: resolved against the server's CWD
+		"~/certs/ca.pem", // tilde: a different home in a container
+		"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n", // pasted PEM text
+		"/tmp/ca.pem\n../evil", // a newline would break the keyword=value line
+	} {
+		got, err := normalizeRootCert(bad, "verify-full")
+		if err == nil {
+			t.Errorf("%q accepted as %q", bad, got)
+		}
+		if got != "" {
+			t.Errorf("%q returned a usable value %q", bad, got)
+		}
+	}
+
+	// A path is not a secret, so it is stored as given apart from paste spacing.
+	if got, err := normalizeRootCert("  /etc/ssl/certs/internal-ca.pem  ", "verify-ca"); err != nil ||
+		got != "/etc/ssl/certs/internal-ca.pem" {
+		t.Errorf("trimmed path = %q, err = %v", got, err)
+	}
+
+	// No CA is a legitimate state: it means "use the system trust store".
+	if got, err := normalizeRootCert("", "verify-full"); err != nil || got != "" {
+		t.Errorf("empty = %q, err = %v; want empty", got, err)
+	}
+}
+
+func TestPostgresDSNFailsLoudlyWhenTheCAMissingFromDisk(t *testing.T) {
+	// If pgx parsed the dsn without opening the file, the parameter we emit is
+	// not the one libpq reads — this is the assertion that makes the previous
+	// test's success meaningful rather than accidental.
+	dsn := mustDSN(t, &entity.ConnectionConfig{
+		Host: "dwh.internal", Port: 5432, User: "reader", Database: "sales",
+		SSLMode: "verify-ca", RootCert: "/var/lib/muara/absent-ca.pem",
+	})
+	if _, err := pgx.ParseConfig(dsn); err == nil {
+		t.Error("pgx ignored sslrootcert, so the keyword is not the one libpq reads")
+	}
+}
+
+func TestPostgresDSNDoesNotLetCredentialsNameARootCert(t *testing.T) {
+	cfg := &entity.ConnectionConfig{
+		Host: "dwh.internal", Port: 5432, User: "reader",
+		Password: "x sslrootcert=/etc/hosts sslmode=disable",
+		Database: "sales", SSLMode: "verify-full",
+	}
+
+	parsed, err := pgx.ParseConfig(mustDSN(t, cfg))
+	if err != nil {
+		// Reading /etc/hosts as a CA would fail here, so a parse error is proof
+		// the password escaped its value.
+		t.Fatalf("password injected a CA file: %v", err)
+	}
+	if parsed.Config.Password != cfg.Password {
+		t.Errorf("password = %q, want it preserved verbatim", parsed.Config.Password)
+	}
+	if parsed.TLSConfig == nil {
+		t.Error("injected sslmode=disable took effect")
 	}
 }

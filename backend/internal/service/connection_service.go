@@ -166,6 +166,16 @@ func (s *ConnectionService) UpsertEnvironment(ctx context.Context, wsID, connID 
 	}
 	req.SSLMode = sslMode
 
+	// A CA path is checked against the mode that would read it, at the same
+	// point: an unusable combination saved here would only appear later as a
+	// TLS error at ATTACH time, in a different process, with no hint that the
+	// profile itself was the problem.
+	rootCert, err := normalizeRootCert(req.RootCert, sslMode)
+	if err != nil {
+		return nil, customerror.NewBadRequestError(err.Error(), err)
+	}
+	req.RootCert = rootCert
+
 	// Prepare credential payload
 	cfgPayload := entity.ConnectionConfig{
 		Host:     req.Host,
@@ -174,6 +184,7 @@ func (s *ConnectionService) UpsertEnvironment(ctx context.Context, wsID, connID 
 		User:     req.User,
 		Password: req.Password,
 		SSLMode:  req.SSLMode,
+		RootCert: req.RootCert,
 		URI:      req.URI,
 	}
 
