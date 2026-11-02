@@ -68,7 +68,10 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   tak dikenal menolak dengan alasan, plus dua bug ikut tertutup di jalur error (pesan yang membocork `passwd`,
   cache yang tertimpa `{}`) — lihat blok `SyncSchema` lintas driver (blok di §3). Dan **katalog sumbernya
   diperluas** — `DescribeSource` sekarang membaca kunci, nullability, komentar dan taksiran baris dari tiga
-  fungsi katalog DuckDB, dibuktikan pada katalog temp tanpa server apa pun (blok katalog sumber).
+  fungsi katalog DuckDB, dibuktikan pada katalog temp tanpa server apa pun (blok katalog sumber). Dan **penanda
+  pemotongan akhirnya sampai ke layar**: empat field yang sudah dikirim API sejak M1.4 kini dirender di lima
+  permukaan — callout amber di panel hasil, sufiks + ikon ⚠ di kartu widget dan halaman share (blok penanda
+  pemotongan).
   Semuanya lewat gerbang empat-mode.
 - **Kondisi Backend Terakhir yang Terverifikasi:**
   - Public Sharing & Signed JWT Embed teruji & terpasang.
@@ -150,7 +153,8 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   Precedence: `row_limit` > `source_cap`.
 - **Ke mana field-nya keluar:** `internal/dto/response/query.go` menambahkan keempat field itu (dengan komentar
   bahwa engine yang memutuskan, UI hanya merender) dan dipetakan di `query_service.go:109` + `share_service.go:324`.
-  **UI frontend belum menampilkan penanda pemotongan** — itu disengaja, masuk M2 desktop/phase berikutnya.
+  **UI frontend sudah memasangnya 2026-11-02** — sebelumnya disengaja belum, dan itu blockernya cuma satu: tidak ada
+  penanda di layar padahal field-nya sudah dikirim. Lihat blok "Penanda pemotongan sampai ke UI" di §3.
 - **Gerbang verifikasi:** tes baru `engine/duckdb/truncation_test.go` (7 kasus: terpotong, utuh di bawah cap, pas
   di cap, `LIMIT` penulis lebih ketat dari cap, default platform, `source_cap`, `row_limit` mengalahkan `source_cap`),
   `TestPlanLimit` di `guardrails_test.go`, `TestCappedMongoViews` di `nosql_adapter_test.go`. Kedua modul hijau pada
@@ -579,6 +583,54 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   kedua sisi; `TestCatalogQueriesBindTheAliasAndKeepTheirOrder` mengunci tiga query (bind, budget, urutan, filter).
   Gerbang empat-mode (engine + web × `CGO_ENABLED=1/0`, build/vet/test) dan verifikasi modul desktop (konsumen
   kedua dari engine yang sama) hijau, `gofmt` bersih.
+
+### Penanda pemotongan sampai ke UI (2026-11-02, lanjutan M1.4)
+- **Kontrak tidak berubah; yang berubah hanya render.** Keempat field (`row_limit`, `truncated`, `truncated_by`,
+  `capped_sources`) sudah dikirim API sejak M1.4 dan **tidak pernah dibaca frontend** — grep `truncated` di
+  `frontend/` menghasilkan nol. Artinya sejak hari itu guardrail membuang baris ke-(cap+1) sementara panel hasil
+  tetap menulis "10.000 baris" seolah itu seluruh jawaban, dan agregat di chart/KPI ikut dibaca sebagai angka penuh.
+- **Satu tempat keputusan di sisi UI:** komponen baru `components/query/truncation-note.tsx`. `truncationMessage()`
+  memetakan flag → pesan Indonesia, lalu dua bentuk render memakai pesan yang sama: `TruncationNote` (blok amber di
+  atas panel hasil) dan `TruncationMarker` (sufiks ringkas di baris metadata). Komponennya tidak memutuskan apa pun
+  — tanpa `truncated` ia mengembalikan `null`, jadi hasil utuh tidak mungkin kebagian penanda.
+- **Amber, bukan merah.** Query-nya berhasil; yang sebagian cuma cakupannya. Callout error
+  `bg-destructive/10` sudah punya arti sendiri di tiga panel yang sama, jadi mencampur keduanya membuat "gagal"
+  dan "terbatas" tidak bisa dibedakan dari jauh.
+- **Lima permukaan dipasang** (scope disetujui user): callout di Data Studio (`app/(app)/studio/page.tsx`), drawer
+  widget (`inspector/widget-drawer.tsx`), dan editor semantic model (`semantic/model-editor.tsx`); kartu widget di
+  canvas (`canvas/widget-card.tsx`) dan halaman share/embed (`public/public-canvas.tsx`) dapat sufiks di baris
+  metadata **plus ikon ⚠ di judul**, supaya pembaca dashboard tahu tanpa perlu membuka drawer. Permukaan publik
+  sebelumnya **tidak punya baris metadata sama sekali**, jadi satu baris "N baris · Xms" dibuat lebih dulu di sana.
+- **Dua alasan dibedakan di teks, dan presedensi engine ikut dipertahankan.** `row_limit` → "Hanya 10.000 baris
+  pertama yang diambil…", `source_cap` → "Sumber `logs_sessions` hanya dibaca sampai batas pengambilannya…".
+  Karena `session_cgo.go:425` mendahulukan `row_limit` padahal `capped_sources` tetap terisi saat keduanya terjadi,
+  pesan `row_limit` juga menyebut daftar sumbernya — kalau tidak, fakta itu hilang dari layar justru pada query yang
+  paling tidak lengkap.
+- **`data-table.tsx` sengaja tidak disentuh.** Footer grid itu sudah mencetak "(dibatasi 200)" dan itu arti **lain**
+  (paginasi client atas payload yang sudah diterima). Dua makna "dibatasi" dalam satu panel membingungkan, maka
+  penanda guardrail memakai kata "dipotong" dan tidak pernah menyentuh footer.
+- **Bukti terukur:** (1) `internal/dto/response/query_test.go` mengunci nama key di wire lewat marshal langsung —
+  sekarang mengganti tag Go menggagalkan tes, bukan menghapus penanda diam-diam; (2) tes baru
+  `engine/duckdb/result_wire_test.go` membuktikan `QueryResult` — struct yang disimpan Redis — round-trip membawa
+  flag-nya, karena hasil kedua yang datang dari cache tanpa `truncated` akan tampak utuh; jalan di `CGO_ENABLED=1`
+  **dan** `=0`; (3) DOM diukur, bukan diasumsikan: route sementara `/tmp-truncation-check` me-seed `QueryClient`
+  dengan hasil terpotong, lalu HTML hasil render dibaca — `Hasil dipotong guardrail` muncul 3× (callout, marker,
+  kartu publik), `Data sumber belum terbaca seluruhnya` 2× (callout + kartu canvas), ikon `text-amber-600` di judul
+  2×, `title=` tooltip berisi kalimat penuh 5×, dan bagian hasil **utuh** menghasilkan **nol** elemen. Route sudah
+  dihapus; `tsc --noEmit` bersih dan `npm run build` sukses (13 route, tanpa route sementara).
+- **Yang ikut tertutup di sisi desktop:** grid spike `frontend/src/App.jsx` sudah menampilkan `truncated` +
+  `truncated_by` sejak M1.4 tetapi belum `capped_sources`, dan alasannya dieja mentah (`row_limit`). Sekarang
+  keduanya berselaras dengan web (`baris dipotong ke N pertama` / `sebagian sumber hanya terbaca sampai batasnya: …`,
+  membandingkan lewat enum `TruncateReason` dari binding, bukan string literal), dan badge-nya pindah ke token
+  `--warn` BRD §12.2 karena `--accentSoft` membacanya sebagai informasi, bukan peringatan. Dibuktikan dengan
+  `vite build` + string dan literal `source_cap` ikut muncul di bundle.
+- **Belum bisa dibuktikan di mesin ini:** `TestQueryCacheRedisKeepsTheTruncationFlag` (round trip flag lewat Redis
+  sungguhan) ikut ditulis tapi **tidak dapat jalan** — Redis user menolak semua write dengan
+  `MISCONF Redis is configured to save RDB snapshots, but it's currently unable to persist to disk` (disk tinggal
+  1,5 GiB dari 228 GB), dan empat tes Redis yang sudah ada pun gagal karena sebab yang sama, bukan karena kode.
+  Round trip-nya sementara dibuktikan di level struct (butir 2); bukti HTTP sungguhan butuh infra user sehat lagi.
+- **Gerbang:** empat-mode web (engine + web × `CGO_ENABLED=1/0`) hijau + `gofmt` bersih; desktop
+  `DESKTOP-DONE` dengan `fail=0` termasuk `CGO-OFF-REJECTED-OK` (biner app tanpa CGO memang harus gagal).
 
 
 ---

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ChartRenderer } from "@/components/canvas/chart-renderer";
 import { DataTable } from "@/components/canvas/data-table";
+import { TruncationMarker, truncationMessage } from "@/components/query/truncation-note";
 import { useCrossFilter } from "@/hooks/use-cross-filter";
 import { useQueryExecutor } from "@/hooks/use-query-executor";
 import { buildEchartsOption, inferFields, pickKpi } from "@/lib/echarts-options";
@@ -89,6 +90,8 @@ export function WidgetCard({
     [widget, result],
   );
 
+  const truncation = truncationMessage(result);
+
   return (
     <Card
       className={cn(
@@ -101,11 +104,19 @@ export function WidgetCard({
     >
       <header className="drag-handle flex cursor-grab items-center justify-between gap-2 border-b border-border bg-secondary/60 px-3 py-1.5">
         <div className="min-w-0">
-          <p className="truncate text-sm font-medium text-foreground">{widget.title}</p>
+          <p className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-foreground">
+            {truncation && (
+              <span title={truncation.detail}>
+                <TriangleAlert className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+              </span>
+            )}
+            <span className="truncate">{widget.title}</span>
+          </p>
           <p className="text-[11px] text-muted-foreground">
             {widget.chart_type} · {widget.query_mode}
             {result ? ` · ${result.row_count} rows · ${result.duration_ms}ms` : ""}
             {result?.cached ? " · cached" : ""}
+            {result && <TruncationMarker flags={result} />}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-0.5">

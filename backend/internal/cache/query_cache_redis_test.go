@@ -106,6 +106,48 @@ func TestQueryCacheRedisServesSecondReadFromCache(t *testing.T) {
 	}
 }
 
+// A truncated answer is served from Redis on the second read, so the flag has to
+// survive the JSON round trip: an unmarked cached result would tell the reader a
+// partial answer is the whole one.
+func TestQueryCacheRedisKeepsTheTruncationFlag(t *testing.T) {
+	c := newRedisCache(t)
+	ctx := context.Background()
+
+	key := c.GenerateKey("ws-trunc", "prod", "SELECT total FROM sessions", QueryCacheScopeFixture{})
+	seed := resultWith([]map[string]any{{"total": 1}})
+	seed.RowLimit = 10000
+	seed.Truncated = true
+	seed.TruncatedBy = duckdb.TruncateSourceCap
+	seed.CappedSources = []string{"logs_sessions"}
+
+	if _, _, err := c.ExecuteCachedOrLive(ctx, key, time.Minute, false,
+		func(context.Context) (*duckdb.QueryResult, error) { return seed, nil }); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	calls := 0
+	got, cached, err := c.ExecuteCachedOrLive(ctx, key, time.Minute, false,
+		func(context.Context) (*duckdb.QueryResult, error) {
+			calls++
+			return resultWith(nil), nil
+		})
+	if err != nil {
+		t.Fatalf("cached read: %v", err)
+	}
+	if !cached || calls != 0 {
+		t.Fatalf("want a cache hit without re-executing: cached=%v calls=%d", cached, calls)
+	}
+	if !got.Truncated || got.TruncatedBy != duckdb.TruncateSourceCap {
+		t.Errorf("truncation lost in the round trip: truncated=%v by=%q", got.Truncated, got.TruncatedBy)
+	}
+	if got.RowLimit != 10000 {
+		t.Errorf("row_limit lost in the round trip: %d", got.RowLimit)
+	}
+	if len(got.CappedSources) != 1 || got.CappedSources[0] != "logs_sessions" {
+		t.Errorf("capped_sources lost in the round trip: %v", got.CappedSources)
+	}
+}
+
 // QueryCacheScopeFixture mirrors service.QueryCacheScope. The cache package must
 // not import service, so scope separation is verified through the JSON shape the
 // service actually hashes: {"parameters":...,"rls":[{"column":...}]}.

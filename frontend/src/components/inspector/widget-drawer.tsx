@@ -27,6 +27,7 @@ import { SqlEditor } from "@/components/inspector/sql-editor";
 import { TableStyleFields } from "@/components/inspector/table-style-fields";
 import { ChartRenderer } from "@/components/canvas/chart-renderer";
 import { DataTable } from "@/components/canvas/data-table";
+import { TruncationNote } from "@/components/query/truncation-note";
 import { useSchemaTree } from "@/hooks/use-schema-tree";
 import { useQueryExecutor } from "@/hooks/use-query-executor";
 import { buildEchartsOption, inferFields } from "@/lib/echarts-options";
@@ -499,6 +500,8 @@ function WidgetDraft({
           </label>
           </div>
         )}
+
+        <TruncationNote flags={previewResult} />
 
         {chartType === "table" && previewResult ? (
           <div className="h-44">

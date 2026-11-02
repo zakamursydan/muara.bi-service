@@ -18,6 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ChartRenderer } from "@/components/canvas/chart-renderer";
 import { DataTable } from "@/components/canvas/data-table";
+import { TruncationNote } from "@/components/query/truncation-note";
 import { SqlEditor } from "@/components/inspector/sql-editor";
 import { SaveAsWidgetDialog } from "@/components/studio/save-as-widget-dialog";
 import { useQueryExecutor } from "@/hooks/use-query-executor";
@@ -287,6 +288,7 @@ export default function StudioPage() {
               </div>
             ) : (
               <>
+                <TruncationNote flags={result.data} />
                 <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
                   <span>
                     {result.data.row_count} baris · {result.data.duration_ms}ms

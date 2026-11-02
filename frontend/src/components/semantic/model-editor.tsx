@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { DataTable } from "@/components/canvas/data-table";
+import { TruncationNote } from "@/components/query/truncation-note";
 import { SqlEditor } from "@/components/inspector/sql-editor";
 import { useQueryExecutor } from "@/hooks/use-query-executor";
 import {
@@ -207,6 +208,8 @@ export function ModelEditor({
           </span>
         </div>
       </div>
+
+      <TruncationNote flags={preview.data} />
 
       {preview.data ? (
         <DataTable result={preview.data} limit={100} className="max-h-64" />

@@ -253,11 +253,21 @@ export type SemanticModel = {
   updated_at: string;
 };
 
+export type TruncateReason = "row_limit" | "source_cap";
+
 export type ExecuteQueryResponse = {
   columns: ColumnMeta[];
   rows: Record<string, unknown>[];
   row_count: number;
   duration_ms: number;
+  /** Row cap in force for this statement; always reported, so a full answer is
+    distinguishable from a capped one. */
+  row_limit: number;
+  /** Decided by the engine, never by the UI: false means this is the whole answer. */
+  truncated: boolean;
+  truncated_by?: TruncateReason;
+  /** Mounted views whose source read was already capped before DuckDB saw it. */
+  capped_sources?: string[];
   cached: boolean;
   env_tag: string;
 };

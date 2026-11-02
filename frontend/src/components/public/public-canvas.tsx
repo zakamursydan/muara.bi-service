@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ChartRenderer } from "@/components/canvas/chart-renderer";
 import { DataTable } from "@/components/canvas/data-table";
+import { TruncationMarker, truncationMessage } from "@/components/query/truncation-note";
 import { api } from "@/lib/api";
 import { buildEchartsOption, inferFields, pickKpi } from "@/lib/echarts-options";
 import { stableStringify } from "@/lib/queries";
@@ -195,10 +196,25 @@ function PublicWidgetCard({
     [result, widget],
   );
 
+  const truncation = truncationMessage(result);
+
   return (
     <Card className={cn("flex flex-col overflow-hidden bg-card shadow-sm", className)} style={style}>
       <header className="border-b border-border bg-secondary/60 px-3 py-1.5">
-        <p className="truncate text-sm font-medium text-foreground">{widget.title}</p>
+        <p className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-foreground">
+          {truncation && (
+            <span title={truncation.detail}>
+              <TriangleAlert className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+            </span>
+          )}
+          <span className="truncate">{widget.title}</span>
+        </p>
+        {result && (
+          <p className="text-[11px] text-muted-foreground">
+            {result.row_count} baris · {result.duration_ms}ms
+            <TruncationMarker flags={result} />
+          </p>
+        )}
       </header>
       <div className="relative min-h-40 flex-1 p-2">
         {query.isLoading && (
