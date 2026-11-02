@@ -85,6 +85,10 @@ type Session interface {
 	// RegisterTempView creates or replaces an in-memory temporary virtual view
 	RegisterTempView(ctx context.Context, viewName string, query string) error
 
+	// RegisterFileSource mounts a local CSV/Parquet/JSON file as a temporary
+	// view, with its columns inferred by DuckDB's core readers
+	RegisterFileSource(ctx context.Context, viewName string, path string) error
+
 	// RegisterJSONData mounts an in-memory JSON array as a temporary table/view
 	RegisterJSONData(ctx context.Context, viewName string, jsonData []byte) error
 

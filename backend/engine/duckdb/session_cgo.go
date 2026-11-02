@@ -8,23 +8,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	goduckdb "github.com/marcboeker/go-duckdb"
+
+	"muara.bi/engine/sqlident"
 )
-
-// quoteIdent wraps an object name in double quotes so DuckDB reads it as one
-// identifier instead of re-parsing characters like "-".
-func quoteIdent(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
-}
-
-// quoteLiteral turns driver text into a DuckDB string literal. Credentials are
-// user supplied, so an embedded quote must not be able to close the ATTACH text.
-func quoteLiteral(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
-}
 
 type cgoEngine struct {
 	maxMemory          string
@@ -155,6 +144,20 @@ func (s *cgoSession) RegisterTempView(ctx context.Context, viewName string, quer
 		return fmt.Errorf("failed to register temp view %s: %w", viewName, err)
 	}
 	return nil
+}
+
+// RegisterFileSource mounts one local file as a temporary view. The name is
+// held to the identifier rule because it reaches DDL, like the semantic layer;
+// the path only ever reaches a quoted string literal.
+func (s *cgoSession) RegisterFileSource(ctx context.Context, viewName string, path string) error {
+	if !sqlident.IsPlain(viewName) {
+		return fmt.Errorf("invalid file source name %q: use letters, digits and underscores", viewName)
+	}
+	query, err := FileSourceQuery(path)
+	if err != nil {
+		return err
+	}
+	return s.RegisterTempView(ctx, viewName, query)
 }
 
 func (s *cgoSession) RegisterJSONData(ctx context.Context, viewName string, jsonData []byte) error {

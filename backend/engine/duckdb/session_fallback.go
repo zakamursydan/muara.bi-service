@@ -38,6 +38,10 @@ func (disabledSession) RegisterTempView(ctx context.Context, viewName string, qu
 	return ErrCGODisabled
 }
 
+func (disabledSession) RegisterFileSource(ctx context.Context, viewName string, path string) error {
+	return ErrCGODisabled
+}
+
 func (disabledSession) RegisterJSONData(ctx context.Context, viewName string, jsonData []byte) error {
 	return ErrCGODisabled
 }
