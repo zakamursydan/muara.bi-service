@@ -129,6 +129,8 @@ func (s *ConnectionService) ListConnections(ctx context.Context, wsID string) ([
 				Port:             cfg.Port,
 				Database:         cfg.Database,
 				User:             cfg.User,
+				SSLMode:          cfg.SSLMode,
+				RootCert:         cfg.RootCert,
 				CachedSchema:     e.CachedSchema,
 				LastSyncedAt:     e.LastSyncedAt,
 			})
@@ -229,6 +231,8 @@ func (s *ConnectionService) UpsertEnvironment(ctx context.Context, wsID, connID 
 		Port:             req.Port,
 		Database:         req.Database,
 		User:             req.User,
+		SSLMode:          req.SSLMode,
+		RootCert:         req.RootCert,
 	}, nil
 }
 

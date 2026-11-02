@@ -46,7 +46,9 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   ganda) ditutup dan `ssl_mode` kini divalidasi (400, bukan gagal koneksi); exit criterion terakhir dibuktikan
   `make image-core` (blok M1.3 di bawah). Langkah berikutnya bukan di repo ini: spike **M0 desktop**
   (Wails v3 × CGO × offline di tiga OS). Yang masih menggantung di web: uji HTTP validasi `ssl_mode` dan
-  `root_cert` (butuh `muara_api` dibangun ulang — infra milik user) dan UI form koneksi untuk kolom CA.
+  `root_cert` (butuh `muara_api` dibangun ulang — infra milik user); **UI form koneksi untuk kolom CA sudah
+  dibuat 2026-11-02**, sekalian menutup round-trip `ssl_mode`/`root_cert` yang sebelumnya tidak pernah kembali
+  dari API (blok CA UI di §3).
   (CA MongoDB ditutup 2026-11-02; CA MySQL memang tidak punya kata kunci di connectornya, dan `threads`
   sekarang knob `DUCKDB_THREADS`.)
   Update 2026-11-01 di repo ini: `NormalizeMaxMemory` kini menerima unit biner DuckDB
@@ -59,7 +61,10 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   di titik tulis, blok CA privat), **builder MySQL dibetulkan** dan grammar `mysql_scanner` diukur per karakter
   dengan perakitnya pindah ke engine (`duckdb.MySQLDSN`), `root_cert` ditolak untuk driver yang connector-nya
   tidak bisa membaca CA (blok MySQL), dan **`threads` keluar dari hardcoded** jadi `DUCKDB_THREADS` +
-  `NormalizeThreads` di engine (blok threads). Semuanya lewat gerbang empat-mode.
+  `NormalizeThreads` di engine (blok threads). Terakhir: **kolom CA masuk form koneksi**, dan bersamaan dengan
+  itu **dibetulkan satu cacat senyap** — `ssl_mode`/`root_cert` tidak pernah dikembalikan API sehingga setiap kali
+  form dibuka ulang lalu disimpan, mode TLS kembali `"prefer"` dan path CA hilang (blok CA UI). Semuanya lewat
+  gerbang empat-mode.
 - **Kondisi Backend Terakhir yang Terverifikasi:**
   - Public Sharing & Signed JWT Embed teruji & terpasang.
   - Scheduled Digest & Threshold Alerts Dispatcher teruji & terhubung ke Asynq scheduler.
@@ -402,6 +407,42 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   tidak disentuh — tugasnya membuktikan default engine sampai, sama seperti `max_memory`.
 - **Masih terbuka:** apakah `cores-1` benar-benar lebih baik daripada 2 untuk `ATTACH` lewat jaringan adalah
   pertanyaan performa, dan pengukurannya tetap butuh jalur Postgres non-localhost (infra milik user).
+
+### UI kolom CA di form koneksi web — dan `ssl_mode` yang ternyata tidak kembali (2026-11-02)
+- **Bug yang ditemukan lebih dulu, waktu menyiapkan kolomnya:** API tidak pernah mengembalikan `ssl_mode` dan
+  `root_cert`, tetapi form selalu mulai dari `ssl_mode: "prefer"` dan CA kosong. Jadi **mengubah environment yang
+  sudah ada lalu menekan Simpan menulis ulang mode TLS dan menghapus path CA tersimpan** — tanpa satu pun pesan
+  kesalahan, dan hilangnya verifikasi itu baru terasa saat koneksi berikutnya gagal. Kolom UI adalah pekerjaan
+  kecil; yang membuatnya aman adalah menutup round-trip ini lebih dulu.
+- **Yang tetap tidak dikembalikan:** `password` dan `uri`. Keduanya write-only karena sebuah URI bisa membawa
+  kredensial, dan respons environment dibaca semua anggota workspace. Jebakan "kosong = menghapus" untuk
+  kedua field itu tetap ada dan sengaja dibiarkan sebagai **celah yang diketahui** — memperbaikinya berarti
+  ikut mengembalikan kredensial, jadi satu-satunya jalan yang benar adalah `PATCH` per-field, bukan menebak dari form.
+- **Perubahannya:** `EnvironmentInfoResponse` +`SSLMode`/`RootCert` dan keduanya diisi di **dua** titik builder
+  (`ListConnections` dari config hasil dekripsi, `UpsertEnvironment` dari nilai yang sudah dinormalisasi — bukan
+  dari yang diketik, supaya yang tampil adalah yang benar-benar tersimpan); `T.EnvironmentInfo` +
+  `ssl_mode`/`root_cert`, `T.UpsertEnvironmentRequest` +`root_cert`; form memakai `environment?.ssl_mode || "prefer"`
+  (nilai kosong lama tetap punya default) dan `environment?.root_cert ?? ""`.
+- **Aturan connector dipindah ke UI, dengan pesan yang sama:** path CA hanya aktif untuk postgres & mongodb;
+  untuk mysql & sqlite kolomnya **tampil tapi nonaktif** dengan alasan yang benar (mysql_scanner tidak punya
+  kata kunci TLS; SQLite dibuka tanpa TLS) supaya operator tahu field itu memang tidak ada, bukan lupa dibuat.
+  Peringatan inline muncul begitu path diisi di mode yang tidak membacanya (`require` untuk Postgres, mode tanpa
+  TLS untuk Mongo) — persis kombinasi yang ditolak 400 di titik tulis, jadi user tidak perlu mengirim dulu untuk
+  tahu. `root_cert` juga dikirim sebagai `""` untuk driver non-pendukung, sehingga profil MySQL/SQLite tidak akan
+  pernah bisa membawa CA meski state form sempat terisi.
+- **Bukti:** `TestListConnectionsReturnsTLSSettings` (dua nilai itu selamat sampai reader **dan** JSON respons
+  tidak mengandung password/uri) serta `TestUpsertEnvironmentReturnsNormalizedTLSSettings` (respons membawa nilai
+  yang sudah di-trim; profil SQLite dengan CA ditolak dengan alasan connector). Gerbang empat-mode hijau
+  (`GATE-DONE fail=0`) dan `gofmt` bersih; `tsc --noEmit` dan `npm run build` untuk frontend juga bersih.
+- **Verifikasi visual dilakukan tanpa menyentuh stack user:** route preview sementara (`src/app/ca-preview/`)
+  yang me-render lima `EnvironmentForm` dengan props palsu, dibaca lewat DOM di browser in-app: 2 input CA terisi
+  `/etc/ssl/certs/internal-ca.pem`, 2 nonaktif (mysql/sqlite), dan peringatan muncul tepat satu kali (kasus
+  `require`). Route itu sudah dihapus setelah diperiksa. `take_screenshot` tetap menolak surface tersembunyi, dan
+  dua aksi yang menulis ke stack dev — registrasi akun test dan klik Simpan — diblok izin, jadi **uji klik sungguhan
+  di `/sources` masih menunggu**: perlu `muara_api` + `muara_web` dibangun ulang, dan itu infra milik user.
+- **Batasan yang jujur:** prefill mode/CA yang tersimpan baru bisa dibuktikan lewat HTTP setelah image `muara_api`
+  berisi perubahan DTO ini; container yang sekarang berjalan masih versi lama, jadi responsnya belum memuat
+  kedua field itu.
 
 ---
 

@@ -22,8 +22,16 @@ const dotColor: Record<T.BadgeColor, string> = {
   orange: "bg-orange-500",
 };
 
-type EnvironmentFormProps = {
-  workspaceId: string;
+// Why the CA column is inert for a driver, in the driver's own words. Only the
+// two measured connectors get a specific reason; the rest are not supported at
+// all yet, so the message says that instead of guessing.
+const caBlockedReason: Partial<Record<T.ConnectionDriver, string>> = {
+  mysql:
+    "mysql_scanner hanya menerima host, port, user, passwd, db, dan socket; ssl-ca ditolak sebagai parameter tak dikenal.",
+  sqlite: "SQLite dibuka langsung dari berkas, tanpa TLS.",
+};
+
+type EnvironmentFormProps = {  workspaceId: string;
   connection: T.Connection;
   /** Undefined while drafting a new environment. */
   environment?: T.EnvironmentInfo;
@@ -55,7 +63,8 @@ export function EnvironmentForm({
   const [database, setDatabase] = useState(environment?.database ?? "");
   const [user, setUser] = useState(environment?.user ?? "");
   const [password, setPassword] = useState("");
-  const [sslMode, setSslMode] = useState("prefer");
+  const [sslMode, setSslMode] = useState(environment?.ssl_mode || "prefer");
+  const [rootCert, setRootCert] = useState(environment?.root_cert ?? "");
   const [uri, setUri] = useState("");
   const [ssh, setSsh] = useState(environment?.ssh_tunnel_enabled ?? false);
   const [sshHost, setSshHost] = useState("");
@@ -68,6 +77,15 @@ export function EnvironmentForm({
   const [savedTag, setSavedTag] = useState(environment?.env_tag);
   const [lastTest, setLastTest] = useState<T.TestConnectionResponse | null>(null);
 
+  // The modes whose connector opens the CA file, mirroring normalizeStoredRootCert()
+  // on the server: libpq reads sslrootcert only under verify-ca/verify-full, while
+  // the Go mongo driver reads tlsCAFile for any mode that turns TLS on.
+  const caModes =
+    connection.driver_type === "mongodb"
+      ? ["require", "verify-ca", "verify-full"]
+      : ["verify-ca", "verify-full"];
+  const acceptsCA = connection.driver_type === "postgres" || connection.driver_type === "mongodb";
+
   const body: T.UpsertEnvironmentRequest = {
     env_tag: envTag.trim(),
     display_name: displayName.trim() || envTag.trim(),
@@ -79,6 +97,7 @@ export function EnvironmentForm({
     user: user.trim(),
     password,
     ssl_mode: sslMode,
+    root_cert: acceptsCA ? rootCert.trim() : "",
     uri: uri.trim(),
     ssh_tunnel_enabled: ssh,
     ssh_host: sshHost.trim(),
@@ -206,6 +225,41 @@ export function EnvironmentForm({
         value={uri}
         onChange={setUri}
       />
+
+      {acceptsCA ? (
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="db-root-cert">Path CA (root_cert)</Label>
+          <Input
+            id="db-root-cert"
+            spellCheck={false}
+            placeholder="/etc/ssl/certs/internal-ca.pem"
+            value={rootCert}
+            onChange={(event) => setRootCert(event.target.value)}
+          />
+          <p className="text-[11px] text-muted-foreground">
+            {connection.driver_type === "mongodb"
+              ? "Dibaca sebagai tlsCAFile saat mode mengaktifkan TLS."
+              : "Dibaca sebagai sslrootcert hanya pada mode verify-ca atau verify-full."}{" "}
+            Isinya path di server tempat engine berjalan, bukan teks sertifikat.
+          </p>
+          {rootCert.trim().length > 0 && !caModes.includes(sslMode) && (
+            <p className="text-[11px] text-amber-700">
+              Mode “{sslMode}” tidak membuka berkas CA, jadi menyimpan path ini akan ditolak.
+              Pilih mode yang memverifikasi sertifikat atau kosongkan path.
+            </p>
+          )}
+        </div>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="db-root-cert">Path CA (root_cert)</Label>
+          <Input id="db-root-cert" disabled placeholder="/etc/ssl/certs/internal-ca.pem" value="" />
+          <p className="text-[11px] text-muted-foreground">
+            {caBlockedReason[connection.driver_type] ??
+              `${connection.driver_type} belum punya jalur CA di connector-nya.`}{" "}
+            Simpan CA di sistem sumber atau jalankan koneksi lewat terowongan SSH di bawah ini.
+          </p>
+        </div>
+      )}
 
       <details className="rounded-lg border border-border bg-secondary/40 px-3 py-2">
         <summary className="flex cursor-pointer items-center gap-2 text-sm font-medium text-foreground">

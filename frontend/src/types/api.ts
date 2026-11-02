@@ -166,6 +166,8 @@ export type EnvironmentInfo = {
   port: number;
   database: string;
   user: string;
+  ssl_mode: string;
+  root_cert: string;
   cached_schema?: SchemaMap;
   last_synced_at?: string;
 };
@@ -378,6 +380,7 @@ export type UpsertEnvironmentRequest = {
   user: string;
   password: string;
   ssl_mode: string;
+  root_cert: string;
   uri: string;
   ssh_tunnel_enabled: boolean;
   ssh_host: string;
