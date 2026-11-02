@@ -72,7 +72,7 @@ func NewService(
 		DB:       cfg.Redis.DB,
 	})
 
-	connSvc := service.NewConnectionService(repository.ConnectionRepo, cryptoHelper, sshPool, logger)
+	connSvc := service.NewConnectionService(repository.ConnectionRepo, cryptoHelper, sshPool, duckdbEngine, logger)
 	// One Redis-backed budget spans the API and every worker replica, because a
 	// DuckDB session is the resource that actually runs out of memory.
 	analyticalSlots := limiter.NewSemaphore(

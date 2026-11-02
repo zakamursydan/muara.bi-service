@@ -63,8 +63,10 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   tidak bisa membaca CA (blok MySQL), dan **`threads` keluar dari hardcoded** jadi `DUCKDB_THREADS` +
   `NormalizeThreads` di engine (blok threads). Terakhir: **kolom CA masuk form koneksi**, dan bersamaan dengan
   itu **dibetulkan satu cacat senyap** — `ssl_mode`/`root_cert` tidak pernah dikembalikan API sehingga setiap kali
-  form dibuka ulang lalu disimpan, mode TLS kembali `"prefer"` dan path CA hilang (blok CA UI). Semuanya lewat
-  gerbang empat-mode.
+  form dibuka ulang lalu disimpan, mode TLS kembali `"prefer"` dan path CA hilang (blok CA UI). Terakhir:
+  **`SyncSchema` tidak lagi Postgres-only** — MySQL dan SQLite dibaca lewat katalog DuckDB, MongoDB dan driver
+  tak dikenal menolak dengan alasan, plus dua bug ikut tertutup di jalur error (pesan yang membocork `passwd`,
+  cache yang tertimpa `{}`) — lihat blok `SyncSchema` lintas driver (blok di §3). Semuanya lewat gerbang empat-mode.
 - **Kondisi Backend Terakhir yang Terverifikasi:**
   - Public Sharing & Signed JWT Embed teruji & terpasang.
   - Scheduled Digest & Threshold Alerts Dispatcher teruji & terhubung ke Asynq scheduler.
@@ -443,6 +445,69 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
 - **Batasan yang jujur:** prefill mode/CA yang tersimpan baru bisa dibuktikan lewat HTTP setelah image `muara_api`
   berisi perubahan DTO ini; container yang sekarang berjalan masih versi lama, jadi responsnya belum memuat
   kedua field itu.
+
+---
+
+### `SyncSchema` lintas driver — katalog dibaca dari DuckDB, bukan dari asumsi (2026-11-02)
+- **Yang dibuka:** butir PLAN desktop "`SyncSchema` lintas driver … saat ini hanya Postgres dan diam".
+  Bentuk "diam"-nya paling buruk: `SyncSchema` hanya punya satu `if driver == "postgres"`, jadi sync MySQL,
+  SQLite dan MongoDB **mengembalikan sukses HTTP** tanpa menulis `cached_schema` sama sekali. Grid skema
+  kosong, AI Co-Pilot kehilangan konteks sumbernya, dan operator tidak diberi tahu apa pun.
+- **Yang diukur lebih dulu (DuckDB 1.1.3 + bundel `/Applications/muara-bi.app/…`, fixture SQLite repo desktop)**
+  karena dua jalur discovery tidak bisa disatukan sebelum tahu isinya:
+  - `litesrc.information_schema.columns` → **`Catalog Error: Table with name columns does not exist`**.
+    `sqlite_scanner` tidak memajang information_schema di catalog yang di-ATTACH, jadi "query
+    information_schema saja" bukan jalur yang bisa dipakai lintas driver.
+  - `duckdb_columns()` → melihat **semua** catalog yang di-ATTACH; kolom yang relevan
+    `database_name, schema_name, table_name, column_name, column_index, data_type, is_nullable, internal`.
+    Untuk fixture: `id BIGINT`, `channel VARCHAR`, `total DOUBLE` — SQLite mendeklarasikan `INTEGER`, jadi
+    yang dilaporkan scanner adalah **tipe yang dilihat mesin query**, bukan tipe deklarasi sumber. Ini justru
+    yang benar untuk cache yang dipakai menulis SQL.
+  - `duckdb_tables()` (`has_primary_key`, `estimated_size`, `column_count`, `sql` DDL) dan `duckdb_constraints()`
+    (`constraint_type` = PRIMARY KEY/NOT NULL, `constraint_column_names`, `referenced_table`) ikut mengembalikan
+    catalog yang sama. Itu bahan untuk butir M2 berikutnya, sengaja belum dipakai sekarang.
+- **Keputusan jalur:** Postgres **tinggal di pgx**, MySQL + SQLite lewat engine. Alasannya bukan selera: build web
+  tidak punya Go driver untuk mysql/sqlite (`go.mod` hanya pgx), jadi satu-satunya pembacanya adalah scanner yang
+  sama dengan yang menjalankan query — dan cache yang menggambarkan sesuatu yang tidak bisa di-mount sesi adalah
+  jebakan. Postgres tidak dipindah ke `duckdb_columns()` **karena tidak bisa diukur sekarang**: container sample
+  mati di sisinya (`FATAL: could not open file "global/pg_filenode.map": I/O error`, VM Docker yang sama yang
+  membuat `docker exec` gagal), dan memang tidak ada bukti pembanding spelling tipe Postgres dari scanner.
+  Menyatukan jalur menunggu sample Postgres hidup lagi — restart infra milik user.
+- **API engine baru:** `Session.DescribeSource(ctx, alias) ([]CatalogTable, error)` di `duckdb/types.go`,
+  implementasinya `catalogColumnsQuery` + `groupCatalog` (`duckdb/catalog.go`). Aturan yang ditegakkan di engine,
+  bukan di pemanggil: alias di-**bind** sebagai parameter (`database_name = ?`) dan divalidasi `sqlident.IsPlain`,
+  `internal = false`, urutan `schema_name, table_name, column_index`, dan cap `MaxCatalogColumns = 5000` yang
+  dibaca sebagai **5000+1 sentinel** — preseden M1.4: baris ekstra adalah bukti pemotongan, jadi source yang lebih
+  lebar ditolak, bukan disimpan separuh dan tampak lengkap. Denylist schema sistem
+  (`information_schema, pg_catalog, mysql, performance_schema, sys`) dijalankan di Go supaya teruji tanpa sumber
+  nyata; jalur non-CGO ikut mengembalikan `ErrCGODisabled` seperti method lain.
+- **MongoDB ditolak dengan alasan, bukan diam:** kolom collection schemaless hanya bisa terlihat dengan
+  **membaca dokumen**, dan `cached_schema` dihidangkan ke prompt AI — memindahkan data ke cache melanggar aturan
+  metadata-only. Query tetap jalan karena mount terjadi per eksekusi di bawah row cap. Driver tak dikenal ikut
+  error, jadi tidak ada lagi cabang tanpa suara.
+- **Dua bug yang ikut tertutup di jalur error:**
+  1. `AppError.Error()` menempelkan cause ke pesannya, jadi pesan yang sudah diredaksi pun masih bisa membocorkan
+     lewat cause mentah. Sekarang pesan dan cause-nya sama-sama teks hasil `redactCredentials`
+     (`errors.New(msg)` sebagai cause) — kalau tidak, `passwd=…` masuk ke setiap baris log yang mencetak error itu.
+  2. Discovery yang menghasilkan **nol tabel** pernah menulis `{}` ke cache — menghapus skema yang tadinya bekerja
+     dan menjawab prompt AI dengan "sumber ini tidak punya tabel". Sekarang itu kegagalan, bukan sukses kosong.
+     Loop scan Postgres juga tidak lagi menelan error per-baris (`rows.Err()` diperiksa).
+- **Bentuk tersimpan tidak berubah:** `{tabel: [{name,type}]}`. Keempat pembacanya (`ai_service.go:358`,
+  `stores/schema-store.ts`, `hooks/use-schema-tree.ts`, `lib/monaco-completion.ts`) mem-parse bentuk itu, dan
+  perluasan bentuk adalah butir M2 berikutnya (skema terkualifikasi + PK/FK + nullability) — bukan efek samping
+  butir ini.
+- **Bukti (semua terukur, bukan asumsi):** `TestSyncSchemaStoresTheScannerCatalog` menjalankan jalur sungguhan —
+  engine + bundel + fixture — dan membaca balik JSON yang tersimpan dengan bentuk yang dipakai konsumen;
+  `TestDescribeSourceOnAttachedSQLite` mengunci spelling tipe scanner; `TestDescribeSourceReadsAMountedView`
+  membuktikan catalog SQL-nya valid tanpa server apa pun; `TestGroupCatalog*` (4 kasus) menguji lipatan baris
+  jadi tabel, penyaringan schema sistem, dua tabel bernama sama di schema berbeda, dan katalog kosong;
+  `TestSyncSchemaNamesEveryDriverItCannotDiscover`,
+  `TestSyncSchemaScannerDriversNeedTheAnalyticalEngine`, `TestSyncSchemaRefusesToCacheAnEmptyCatalog`,
+  `TestSyncSchemaStoresScannerColumns`, `TestSyncSchemaRedactsAFailedAttach` menutup kebijakan service. Gerbang
+  empat-mode (engine + web × `CGO_ENABLED=1/0`, build/vet/test) hijau `GATE-DONE fail=0` dan `gofmt` bersih.
+- **Yang belum terukur di sini:** MySQL nyata (tidak ada server di mesin ini — yang diuji hanya wiring attach +
+  cap-nya lewat fake), Postgres lewat scanner (container sample rusak), dan uji klik di UI `/sources` yang
+  masih menunggu `muara_api` dibangun ulang (infra milik user).
 
 ---
 

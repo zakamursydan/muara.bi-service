@@ -496,6 +496,9 @@ func (r *recordingSession) RegisterFileSource(context.Context, string, string) e
 	return nil
 }
 func (r *recordingSession) RegisterJSONData(context.Context, string, []byte) error { return nil }
+func (r *recordingSession) DescribeSource(context.Context, string) ([]duckdb.CatalogTable, error) {
+	return nil, nil
+}
 func (r *recordingSession) Query(context.Context, string, duckdb.QueryOptions, ...any) (*duckdb.QueryResult, error) {
 	return nil, nil
 }

@@ -36,19 +36,24 @@ type ConnectionService struct {
 	connRepo pgsql.ConnectionRepositoryProvider
 	crypto   *cryptohelper.CryptoHelper
 	sshPool  *ssh.TunnelPool
-	logger   *logging.Logger
+	// engine reads the catalogue of sources this build has no Go driver for, so
+	// a schema cache describes exactly what a query session can mount.
+	engine duckdb.Engine
+	logger *logging.Logger
 }
 
 func NewConnectionService(
 	connRepo pgsql.ConnectionRepositoryProvider,
 	crypto *cryptohelper.CryptoHelper,
 	sshPool *ssh.TunnelPool,
+	engine duckdb.Engine,
 	logger *logging.Logger,
 ) *ConnectionService {
 	return &ConnectionService{
 		connRepo: connRepo,
 		crypto:   crypto,
 		sshPool:  sshPool,
+		engine:   engine,
 		logger:   logger,
 	}
 }
@@ -339,6 +344,15 @@ func redactCredentials(msg string, cfg *entity.ConnectionConfig) string {
 	return msg
 }
 
+// cachedColumn is one entry of cached_schema. That JSONB column is served verbatim
+// to the schema tree, the Monaco completion source and the AI prompt, so this
+// shape is the contract every driver has to answer to — including the ones added
+// after Postgres.
+type cachedColumn struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
 func (s *ConnectionService) SyncSchema(ctx context.Context, wsID, connID, envTag string) error {
 	cfg, conn, err := s.GetDecryptedConfig(ctx, wsID, connID, envTag)
 	if err != nil {
@@ -347,53 +361,125 @@ func (s *ConnectionService) SyncSchema(ctx context.Context, wsID, connID, envTag
 
 	s.logger.Info(fmt.Sprintf("syncing schema for conn=%s alias=%s env=%s", connID, conn.AliasName, envTag))
 
-	// For Postgres: query information_schema.columns
-	if conn.DriverType == "postgres" {
-		dsn, err := postgresDSN(cfg)
-		if err != nil {
-			return customerror.NewBadRequestError(err.Error(), err)
-		}
+	tables, err := s.discoverSchema(ctx, conn, cfg)
+	if err != nil {
+		// Attaching a source makes its credentials part of the statement, and the
+		// scanner echoes that statement back in its error. AppError.Error() appends
+		// its cause, so both halves have to be the redacted text — keeping the raw
+		// error as the cause would put the password in every log line that prints it.
+		msg := redactCredentials(err.Error(), cfg)
+		return customerror.NewBadRequestError(msg, errors.New(msg))
+	}
+	if len(tables) == 0 {
+		// Storing an empty map would wipe a cache that works and then answer the AI
+		// prompt with "this source has no tables", so seeing nothing is a failure.
+		return customerror.NewBadRequestError(fmt.Sprintf(
+			"source %s exposes no queryable tables in environment %q", conn.AliasName, envTag), nil)
+	}
 
-		targetDB, err := sql.Open("pgx", dsn)
-		if err != nil {
-			return fmt.Errorf("failed to connect to source db for schema discovery: %w", err)
-		}
-		defer targetDB.Close()
-
-		rows, err := targetDB.QueryContext(ctx, `
-			SELECT table_name, column_name, data_type 
-			FROM information_schema.columns 
-			WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
-			ORDER BY table_name, ordinal_position`)
-		if err != nil {
-			return fmt.Errorf("schema query failed: %w", err)
-		}
-		defer rows.Close()
-
-		type ColumnDef struct {
-			Name string `json:"name"`
-			Type string `json:"type"`
-		}
-		tableMap := make(map[string][]ColumnDef)
-		for rows.Next() {
-			var tbl, col, dt string
-			if err := rows.Scan(&tbl, &col, &dt); err == nil {
-				tableMap[tbl] = append(tableMap[tbl], ColumnDef{Name: col, Type: dt})
-			}
-		}
-
-		// cached_schema is a JSONB column and the API serves it verbatim to the
-		// builder and autocomplete, so it is stored as plain metadata, never encrypted.
-		schemaJSON, err := json.Marshal(tableMap)
-		if err != nil {
-			return fmt.Errorf("failed to encode discovered schema: %w", err)
-		}
-		if err := s.connRepo.UpdateCachedSchema(ctx, connID, envTag, schemaJSON); err != nil {
-			return fmt.Errorf("failed to persist cached schema: %w", err)
-		}
+	// cached_schema is a JSONB column and the API serves it verbatim to the
+	// builder and autocomplete, so it is stored as plain metadata, never encrypted.
+	schemaJSON, err := json.Marshal(tables)
+	if err != nil {
+		return fmt.Errorf("failed to encode discovered schema: %w", err)
+	}
+	if err := s.connRepo.UpdateCachedSchema(ctx, connID, envTag, schemaJSON); err != nil {
+		return fmt.Errorf("failed to persist cached schema: %w", err)
 	}
 
 	return nil
+}
+
+// discoverSchema reads the table and column metadata of one source. Each branch
+// uses the reader that will run the eventual query: Postgres through its own Go
+// driver, MySQL and SQLite through the DuckDB scanner because this build carries
+// no driver for them, MongoDB not at all.
+func (s *ConnectionService) discoverSchema(ctx context.Context, conn *entity.DataConnection, cfg *entity.ConnectionConfig) (map[string][]cachedColumn, error) {
+	switch conn.DriverType {
+	case "postgres":
+		return s.discoverPostgres(ctx, cfg)
+	case "mysql", "sqlite":
+		return s.discoverThroughEngine(ctx, conn, cfg)
+	case "mongodb":
+		// A schemaless source has no catalogue to read: its fields only become
+		// visible by streaming documents, and putting that into a cache that is
+		// handed to the AI prompt would move source data into metadata. Queries
+		// still work because the collections are mounted per execution, under the
+		// row cap.
+		return nil, fmt.Errorf("mongodb has no schema to sync: collection fields can only be inferred by reading documents, which the metadata-only rule forbids")
+	default:
+		return nil, fmt.Errorf("no schema discovery for driver %q", conn.DriverType)
+	}
+}
+
+func (s *ConnectionService) discoverPostgres(ctx context.Context, cfg *entity.ConnectionConfig) (map[string][]cachedColumn, error) {
+	dsn, err := postgresDSN(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	targetDB, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to source db for schema discovery: %w", err)
+	}
+	defer targetDB.Close()
+
+	rows, err := targetDB.QueryContext(ctx, `
+		SELECT table_name, column_name, data_type 
+		FROM information_schema.columns 
+		WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+		ORDER BY table_name, ordinal_position`)
+	if err != nil {
+		return nil, fmt.Errorf("schema query failed: %w", err)
+	}
+	defer rows.Close()
+
+	tableMap := make(map[string][]cachedColumn)
+	for rows.Next() {
+		var tbl, col, dt string
+		if err := rows.Scan(&tbl, &col, &dt); err == nil {
+			tableMap[tbl] = append(tableMap[tbl], cachedColumn{Name: col, Type: dt})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("schema query failed while reading rows: %w", err)
+	}
+
+	return tableMap, nil
+}
+
+// discoverThroughEngine attaches the source in a throwaway session and reads the
+// catalogue DuckDB built from it. Discovery is metadata only: no row of source
+// data is selected, and the session is closed before the caller sees a result.
+func (s *ConnectionService) discoverThroughEngine(ctx context.Context, conn *entity.DataConnection, cfg *entity.ConnectionConfig) (map[string][]cachedColumn, error) {
+	if s.engine == nil {
+		return nil, fmt.Errorf("schema discovery for %s needs the analytical engine, which is unavailable in this build", conn.DriverType)
+	}
+
+	session, err := s.engine.NewSession(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open an analytical session for schema discovery: %w", err)
+	}
+	defer session.Close()
+
+	if _, err := attachConnection(ctx, session, *conn, cfg); err != nil {
+		return nil, err
+	}
+
+	tables, err := session.DescribeSource(ctx, conn.AliasName)
+	if err != nil {
+		return nil, err
+	}
+
+	tableMap := make(map[string][]cachedColumn, len(tables))
+	for _, table := range tables {
+		columns := make([]cachedColumn, 0, len(table.Columns))
+		for _, column := range table.Columns {
+			columns = append(columns, cachedColumn{Name: column.Name, Type: column.Type})
+		}
+		tableMap[table.Name] = columns
+	}
+	return tableMap, nil
 }
 
 func (s *ConnectionService) GetDecryptedConfig(ctx context.Context, wsID, connID, envTag string) (*entity.ConnectionConfig, *entity.DataConnection, error) {

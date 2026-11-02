@@ -3,12 +3,15 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 
 	"muara.bi/core/internal/domain/entity"
 	"muara.bi/core/internal/dto/request"
+	"muara.bi/core/pkg/logging"
 	"muara.bi/engine/cryptohelper"
+	"muara.bi/engine/duckdb"
 )
 
 // A connection test answer is shown in the UI, and drivers wrap the URI they
@@ -68,9 +71,10 @@ func TestRedactCredentials(t *testing.T) {
 
 // fakeConnRepo is the storage the connection service reads without a database.
 type fakeConnRepo struct {
-	conn     entity.DataConnection
-	envs     []entity.ConnectionEnvironment
-	savedEnv *entity.ConnectionEnvironment
+	conn        entity.DataConnection
+	envs        []entity.ConnectionEnvironment
+	savedEnv    *entity.ConnectionEnvironment
+	savedSchema []byte
 }
 
 func (f *fakeConnRepo) CreateConnection(context.Context, *entity.DataConnection) error { return nil }
@@ -88,23 +92,31 @@ func (f *fakeConnRepo) UpsertEnvironment(_ context.Context, env *entity.Connecti
 	f.savedEnv = env
 	return nil
 }
-func (f *fakeConnRepo) GetEnvironment(context.Context, string, string) (*entity.ConnectionEnvironment, error) {
+func (f *fakeConnRepo) GetEnvironment(_ context.Context, _, envTag string) (*entity.ConnectionEnvironment, error) {
+	for i := range f.envs {
+		if f.envs[i].EnvTag == envTag {
+			return &f.envs[i], nil
+		}
+	}
 	return nil, nil
 }
 func (f *fakeConnRepo) ListEnvironments(context.Context, string) ([]entity.ConnectionEnvironment, error) {
 	return f.envs, nil
 }
-func (f *fakeConnRepo) UpdateCachedSchema(context.Context, string, string, []byte) error { return nil }
+func (f *fakeConnRepo) UpdateCachedSchema(_ context.Context, _, _ string, schema []byte) error {
+	f.savedSchema = schema
+	return nil
+}
 
 const testMasterKey = "01234567890123456789012345678901" // 32 bytes for AES-256
 
-func newTestConnectionService(t *testing.T, repo *fakeConnRepo) *ConnectionService {
+func newTestConnectionService(t *testing.T, repo *fakeConnRepo, engine duckdb.Engine) *ConnectionService {
 	t.Helper()
 	crypto, err := cryptohelper.NewCryptoHelper(testMasterKey)
 	if err != nil {
 		t.Fatalf("crypto helper: %v", err)
 	}
-	return NewConnectionService(repo, crypto, nil, nil)
+	return NewConnectionService(repo, crypto, nil, engine, logging.NewLogger(io.Discard, "info"))
 }
 
 // The form prefills its SSL fields from this response, so a setting the API does
@@ -138,7 +150,7 @@ func TestListConnectionsReturnsTLSSettings(t *testing.T) {
 		EncryptedConfig: encrypted,
 	}}
 
-	conns, err := newTestConnectionService(t, repo).ListConnections(context.Background(), "ws-1")
+	conns, err := newTestConnectionService(t, repo, nil).ListConnections(context.Background(), "ws-1")
 	if err != nil {
 		t.Fatalf("ListConnections: %v", err)
 	}
@@ -173,7 +185,7 @@ func TestUpsertEnvironmentReturnsNormalizedTLSSettings(t *testing.T) {
 		conn: entity.DataConnection{ID: "conn-1", WorkspaceID: "ws-1", AliasName: "warehouse", DriverType: "postgres"},
 	}
 
-	env, err := newTestConnectionService(t, repo).UpsertEnvironment(context.Background(), "ws-1", "conn-1",
+	env, err := newTestConnectionService(t, repo, nil).UpsertEnvironment(context.Background(), "ws-1", "conn-1",
 		request.UpsertEnvironmentRequest{
 			EnvTag:   "production",
 			Host:     "db.internal",
@@ -195,7 +207,7 @@ func TestUpsertEnvironmentReturnsNormalizedTLSSettings(t *testing.T) {
 	sqlite := &fakeConnRepo{
 		conn: entity.DataConnection{ID: "conn-2", WorkspaceID: "ws-1", AliasName: "ledger", DriverType: "sqlite"},
 	}
-	_, err = newTestConnectionService(t, sqlite).UpsertEnvironment(context.Background(), "ws-1", "conn-2",
+	_, err = newTestConnectionService(t, sqlite, nil).UpsertEnvironment(context.Background(), "ws-1", "conn-2",
 		request.UpsertEnvironmentRequest{
 			EnvTag:   "production",
 			Host:     "/var/lib/ledger.db",

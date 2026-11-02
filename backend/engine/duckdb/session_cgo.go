@@ -187,6 +187,49 @@ func (s *cgoSession) RegisterJSONData(ctx context.Context, viewName string, json
 	return nil
 }
 
+// DescribeSource reads the tables and columns of an attached catalog. It runs on
+// the session's own connection, so it answers for exactly what a query executed
+// in this session could see — including a catalog mounted from a bundle on an
+// offline machine.
+func (s *cgoSession) DescribeSource(ctx context.Context, alias string) ([]CatalogTable, error) {
+	if !sqlident.IsPlain(alias) {
+		return nil, fmt.Errorf("invalid source name %q: use letters, digits and underscores", alias)
+	}
+	if s.statementTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.statementTimeout)
+		defer cancel()
+	}
+
+	rows, err := s.db.QueryContext(ctx, catalogColumnsQuery(MaxCatalogColumns+1), alias)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read the catalogue of %s: %w", alias, err)
+	}
+	defer rows.Close()
+
+	scanned := make([]catalogRow, 0, 64)
+	for rows.Next() {
+		var row catalogRow
+		if err := rows.Scan(&row.Schema, &row.Table, &row.Column, &row.Type); err != nil {
+			return nil, fmt.Errorf("failed to scan a catalogue row of %s: %w", alias, err)
+		}
+		scanned = append(scanned, row)
+
+		// The query asks for one row past the cap. Reaching it proves the source is
+		// wider than a schema cache can honestly hold, instead of returning a
+		// truncated list that reads like the whole catalogue.
+		if len(scanned) > MaxCatalogColumns {
+			return nil, fmt.Errorf("source %q has more than %d columns; point this connection at a narrower database",
+				alias, MaxCatalogColumns)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error while reading the catalogue of %s: %w", alias, err)
+	}
+
+	return groupCatalog(scanned), nil
+}
+
 func (s *cgoSession) Query(ctx context.Context, sqlQuery string, opts QueryOptions, args ...any) (*QueryResult, error) {
 	if s.statementTimeout > 0 {
 		var cancel context.CancelFunc
