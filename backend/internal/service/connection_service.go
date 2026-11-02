@@ -170,6 +170,9 @@ func (s *ConnectionService) UpsertEnvironment(ctx context.Context, wsID, connID 
 	// point: an unusable combination saved here would only appear later as a
 	// TLS error at ATTACH time, in a different process, with no hint that the
 	// profile itself was the problem.
+	if err := checkRootCertDriver(conn.DriverType, req.RootCert); err != nil {
+		return nil, customerror.NewBadRequestError(err.Error(), err)
+	}
 	rootCert, err := normalizeRootCert(req.RootCert, sslMode)
 	if err != nil {
 		return nil, customerror.NewBadRequestError(err.Error(), err)

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -18,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"muara.bi/core/internal/domain/entity"
+	"muara.bi/engine/duckdb"
 )
 
 func TestMongoURIPrefersStoredConnectionString(t *testing.T) {
@@ -350,5 +352,89 @@ func TestPostgresDSNDoesNotLetCredentialsNameARootCert(t *testing.T) {
 	}
 	if parsed.TLSConfig == nil {
 		t.Error("injected sslmode=disable took effect")
+	}
+}
+
+// recordingSession remembers the last MySQL attach so the string web hands the
+// connector can be asserted without a server anywhere near the test.
+type recordingSession struct {
+	alias    string
+	dsn      string
+	attached int
+}
+
+func (r *recordingSession) AttachPostgres(context.Context, string, string) error { return nil }
+func (r *recordingSession) AttachMySQL(_ context.Context, alias, dsn string) error {
+	r.alias, r.dsn = alias, dsn
+	r.attached++
+	return nil
+}
+func (r *recordingSession) AttachSQLite(context.Context, string, string) error     { return nil }
+func (r *recordingSession) RegisterTempView(context.Context, string, string) error { return nil }
+func (r *recordingSession) RegisterFileSource(context.Context, string, string) error {
+	return nil
+}
+func (r *recordingSession) RegisterJSONData(context.Context, string, []byte) error { return nil }
+func (r *recordingSession) Query(context.Context, string, duckdb.QueryOptions, ...any) (*duckdb.QueryResult, error) {
+	return nil, nil
+}
+func (r *recordingSession) Close() error { return nil }
+
+// The mysql branch used to build `user:password@tcp(host:port)/db`, the form Go
+// drivers read. mysql_scanner rejects it, and a password containing "@" or "/"
+// broke the string before that. So the DSN web sends must be the scanner's.
+func TestAttachConnectionSendsMySQLTheScannerDsn(t *testing.T) {
+	rec := &recordingSession{}
+	conn := entity.DataConnection{AliasName: "ops", DriverType: "mysql"}
+	cfg := &entity.ConnectionConfig{
+		Host: "dwh.internal", Port: 3306, User: "reader",
+		Password: "secret words=1", Database: "sales",
+	}
+
+	if _, err := attachConnection(context.Background(), rec, conn, cfg); err != nil {
+		t.Fatalf("attachConnection: %v", err)
+	}
+	want := `host=dwh.internal port=3306 user=reader passwd="secret words=1" db=sales`
+	if rec.dsn != want {
+		t.Errorf("dsn = %q, want %q", rec.dsn, want)
+	}
+	if strings.Contains(rec.dsn, "@tcp(") {
+		t.Error("dsn still uses the Go driver form the scanner refuses")
+	}
+	if rec.alias != "ops" {
+		t.Errorf("alias = %q, want %q", rec.alias, conn.AliasName)
+	}
+}
+
+// A profile the engine refuses must not reach ATTACH with a half-built string.
+func TestAttachConnectionRefusesAnUnusableMySQLSource(t *testing.T) {
+	rec := &recordingSession{}
+	conn := entity.DataConnection{AliasName: "ops", DriverType: "mysql"}
+	cfg := &entity.ConnectionConfig{Host: "", Port: 3306, User: "reader", Database: "sales"}
+
+	if _, err := attachConnection(context.Background(), rec, conn, cfg); err == nil {
+		t.Fatal("an empty host was accepted")
+	}
+	if rec.attached != 0 {
+		t.Errorf("AttachMySQL called %d time(s) with dsn %q", rec.attached, rec.dsn)
+	}
+}
+
+func TestCheckRootCertDriver(t *testing.T) {
+	if err := checkRootCertDriver("postgres", "/etc/ssl/certs/internal-ca.pem"); err != nil {
+		t.Errorf("postgres with a CA path: %v", err)
+	}
+	// No path means nothing to check; normalizeSSLMode/normalizeRootCert own the rest.
+	for _, driver := range []string{"mysql", "mongodb", "sqlite"} {
+		if err := checkRootCertDriver(driver, ""); err != nil {
+			t.Errorf("%s without a CA path: %v", driver, err)
+		}
+	}
+	err := checkRootCertDriver("mysql", "/etc/ssl/certs/internal-ca.pem")
+	if err == nil {
+		t.Fatal("a CA path on a mysql profile was accepted, so it would be stored and ignored")
+	}
+	if !strings.Contains(err.Error(), "mysql") {
+		t.Errorf("error = %q, want it to name the driver that cannot read the file", err)
 	}
 }

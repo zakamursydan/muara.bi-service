@@ -210,7 +210,19 @@ func attachConnection(ctx context.Context, session duckdb.Session, conn entity.D
 		}
 		return nil, session.AttachPostgres(ctx, conn.AliasName, dsn)
 	case "mysql":
-		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
+		// mysql_scanner reads "host=… user=… passwd=…", not the Go driver's
+		// `user:pass@tcp(host:port)/db`; the engine owns that grammar so both
+		// products emit the same string.
+		dsn, err := duckdb.MySQLDSN(duckdb.MySQLSource{
+			Host:   cfg.Host,
+			Port:   cfg.Port,
+			User:   cfg.User,
+			Passwd: cfg.Password,
+			DB:     cfg.Database,
+		})
+		if err != nil {
+			return nil, err
+		}
 		return nil, session.AttachMySQL(ctx, conn.AliasName, dsn)
 	case "sqlite":
 		return nil, session.AttachSQLite(ctx, conn.AliasName, cfg.Database)
@@ -285,6 +297,19 @@ func normalizeSSLMode(raw string) (string, error) {
 // file. "require" negotiates TLS but accepts any certificate, so a CA saved with
 // it would look like verification while nothing is checked.
 var postgresVerifyModes = []string{"verify-ca", "verify-full"}
+
+// checkRootCertDriver rejects a CA path on a driver whose connector cannot read
+// one, before it is encrypted and stored. mysql_scanner was measured (2026-11-02,
+// against DuckDB 1.1.3) to accept exactly host, port, user, passwd, db and socket:
+// ssl-ca, ssl-capath and ssl-mode all come back as "Unrecognized configuration
+// parameter", and credentials cannot be passed as ATTACH options at all. Saving a
+// path there would advertise a verified TLS profile that is still unencrypted.
+func checkRootCertDriver(driverType, raw string) error {
+	if strings.TrimSpace(raw) == "" || driverType == "postgres" {
+		return nil
+	}
+	return fmt.Errorf("root_cert is only read by postgres: the %s connector has no option for a CA file", driverType)
+}
 
 // normalizeRootCert validates a stored CA path against the mode that would use
 // it. libpq opens the certificate from a file, so a relative path resolves

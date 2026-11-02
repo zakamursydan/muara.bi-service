@@ -37,7 +37,7 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
 
 ## 3. Status Terkini (Current Snapshot)
 
-- **Update Terakhir:** 2026-11-01
+- **Update Terakhir:** 2026-11-02
 - **Fase Selesai:** Phase 1, Phase 2, Phase 3 (100% Backend Complete), Phase 4 (100% Frontend) & Phase 5 (E2E Integration, Docker Packaging & Testing), plus refactor lintas-produk **M1** (2026-10-31)
 - **Fase Aktif:** spike **M0 desktop** berjalan (di `muara.bi-desktop/`, lihat PLAN.md di repo itu) — engine
   analitik sudah keluar `internal/`, sekarang benar-benar dikonsumsi dari **modul kedua**, dan Perubahan
@@ -45,14 +45,19 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
 - **Subtask Saat Ini:** **M1 selesai 2026-10-31.** M1.1–M1.5 tuntas, plus bug DSN Postgres lama (`sslmode`
   ganda) ditutup dan `ssl_mode` kini divalidasi (400, bukan gagal koneksi); exit criterion terakhir dibuktikan
   `make image-core` (blok M1.3 di bawah). Langkah berikutnya bukan di repo ini: spike **M0 desktop**
-  (Wails v3 × CGO × offline di tiga OS). Yang masih menggantung di web: uji HTTP validasi `ssl_mode` (butuh
-  `muara_api` dibangun ulang — infra milik user) dan `rootcert`/CA privat (blocker 8 BRD desktop).
+  (Wails v3 × CGO × offline di tiga OS). Yang masih menggantung di web: uji HTTP validasi `ssl_mode` dan
+  `root_cert` (butuh `muara_api` dibangun ulang — infra milik user), CA untuk MongoDB, dan UI form koneksi
+  untuk kolom CA.
   Update 2026-11-01 di repo ini: `NormalizeMaxMemory` kini menerima unit biner DuckDB
   (`KiB|MiB|GiB|TiB`), **default `DUCKDB_MAX_MEMORY` pindah ke `2GiB`** (keputusan user, konsisten dengan
   desktop), tiga catatan M1.5 yang salah dikoreksi, dan **bundel extension akhirnya menegakkan offline** —
   `INSTALL` dilompati dan autoinstall di-set `false` saat `ExtensionDirectory` terisi, karena spike M0
   membuktikan DuckDB sebelumnya mengunduh connector ke folder "bundle" (blok di §3), dan **`0GiB` kini
   ditolak** karena validator hanya memeriksa bentuk, bukan nilai (blok Budget nol).
+  Update 2026-11-02 di repo ini: **CA privat masuk ke DSN Postgres** (`root_cert` → `sslrootcert`, divalidasi
+  di titik tulis, blok CA privat), **builder MySQL dibetulkan** dan grammar `mysql_scanner` diukur per karakter
+  dengan perakitnya pindah ke engine (`duckdb.MySQLDSN`), dan `root_cert` ditolak untuk driver yang connector-nya
+  tidak bisa membaca CA (blok MySQL). Keduanya lewat gerbang empat-mode.
 - **Kondisi Backend Terakhir yang Terverifikasi:**
   - Public Sharing & Signed JWT Embed teruji & terpasang.
   - Scheduled Digest & Threshold Alerts Dispatcher teruji & terhubung ke Asynq scheduler.
@@ -216,8 +221,9 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
   yang dibuat kode ini sendiri (validasi `alias_name` dan sekarang `ssl_mode`). Ketiganya memakai
   `WriteServiceError` sehingga 400 benar-benar jadi 400 — tanpa itu, validasi apa pun tidak akan pernah
   terlihat oleh pemanggil API. `List`/`Test` dibiarkan (errornya murni internal).
-- **Belum ada tempat untuk CA privat (`rootcert`)** — default `disable` tetap salah untuk DB internal
-  self-signed; itu BRD desktop §10 butir 8, masuk M2 (butir 9 sudah ditutup).
+- **CA privat (`root_cert`) sudah punya tempat** sejak 2026-11-02, dirakit sebagai `sslrootcert` oleh
+  `service.postgresDSN` dan divalidasi di titik tulis — lihat blok "CA privat" di bawah. Default `disable`
+  sengaja tidak diubah: itu keputusan per koneksi, bukan cacat perakit DSN.
 - **Gerbang verifikasi:** 6 tes di `internal/service/session_preparer_test.go` (4 DSN + `TestNormalizeSSLMode`
   + `TestPostgresDSNRejectsUnknownSSLMode`), salah satunya membuktikan bentuk DSN lama memang ditolak
   `pgx.ParseConfig`. `go test ./...` hijau di `CGO_ENABLED=1` dan `=0`, `gofmt -l` bersih.
@@ -283,6 +289,54 @@ Saat ini kita berada di [Phase X - Step Y]. Lanjutkan eksekusi task berikutnya s
 - **Compose:** `api` (healthcheck `/health`) → `worker` (override `command`, healthcheck `disable`) → `web` (`API_BASE_URL=http://api:8080`, proxy `/api/*`). Kredensial nyata (`APP_SECRET_KEY`, `APP_ENCRYPTION_MASTER_KEY`, `DB_PASSWORD`) di-guard `:?` supaya compose gagal cepat alih-alih memakai default yang ada di repo publik. `DB_PUBLISH_PORT` memisahkan port host dari port internal `DB_PORT=5432`.
 - **Frontend image:** `output: 'standalone'` ditambahkan di `next.config.ts`; `npm run build` tetap hijau (14 route, PPR utuh) dan `.next/standalone/server.js` ter-generated.
 - **Kendala mesin dev (penting untuk verifikasi lanjutan):** Docker Desktop di mesin ini punya VM 4 GB / host 8 GB dan BuildKit-nya dua kali menggantung di step berat (`go build` link dan `next build`) dengan CPU guest ~0%; egress container sendiri sehat (`proxy.golang.org` 200, `extensions.duckdb.org` 301, `registry.npmjs.org` 200). Docker Hub sempat tidak bisa di-resolve dari daemon, sehingga base image bisa dialihkan lewat build-arg `GO_IMAGE`/`NODE_IMAGE` (mis. mirror `public.ecr.aws/docker/library/...`) — tercatat di `Dockerfile`, `frontend/Dockerfile`, dan `.env.example`.
+
+### CA privat (`root_cert`) di jalur Postgres (2026-11-02, BRD desktop §10 butir 8)
+- **Field baru tanpa migrasi:** `entity.ConnectionConfig.RootCert` (`root_cert`) ikut di payload terenkripsi
+  JSON, dan `request.UpsertEnvironmentRequest.RootCert` menerimanya lewat API; `connection_service.go`
+  menyimpannya dan `session_preparer.go` merakit DSN-nya. Satu builder dipakai **dua** jalur — `SyncSchema`
+  (pgx) dan ATTACH DuckDB — jadi tidak ada lagi kasus "Test Connection hijau, query gagal".
+- **Kata kuncinya `sslrootcert`, bukan `rootcert`.** Diukur dengan probe ke alamat mati (`host=127.0.0.1
+  port=1`): `sslrootcert=` lolos parsing (gagal di TCP), `rootcert=` dan kata kunci rekaan `boguscert=` sama-sama
+  `invalid connection option`. Nama field produk tetap `root_cert` (jelas untuk user), yang dikirim ke driver
+  adalah `sslrootcert`.
+- **Validasi di titik tulis (`UpsertEnvironment` → 400):** wajib path **absolut** (libpq membuka berkas, dan
+  path relatif resolved terhadap CWD proses — dua environment bisa memuat CA berbeda dari satu profil), bukan
+  teks PEM (orang menempel isi sertifikat), dan hanya bersama `verify-ca`/`verify-full`. `require` **tidak**
+  boleh: dia menegosiasi TLS tapi menerima sertifikat apa pun, jadi CA di sampingnya menghasilkan profil yang
+  *terlihat* terverifikasi padahal tidak ada pemeriksaan.
+- **Bukti bukan cuma "diterima":** tes menunjuk CA ke berkas yang tidak ada dan menuntut `pgx.ParseConfig`
+  **gagal**, plus satu CA self-signed yang benar-benar dibuat di tes (`crypto/x509`) supaya
+  `TLSConfig.RootCAs` bisa diperiksa isinya. Satu tes injeksi membuktikan password berisi
+  `sslrootcert=/etc/hosts sslmode=disable` tidak bisa menambah parameter DSN.
+- **Belum diukur:** verifikasi end-to-end dengan server Postgres bersertifikat TLS (butuh sample postgres sehat —
+  infra milik user). Yang terbukti: string-nya diterima kedua jalur dan CA-nya benar-benar dibuka.
+
+### Builder MySQL dibetulkan — grammar `mysql_scanner` diukur (2026-11-02)
+- **Bug yang ditutup:** `attachConnection` merakit `%s:%s@tcp(%s:%d)/%s` — bentuk driver Go yang **ditolak**
+  `mysql_scanner` (`Invalid dsn … - expected key=value pairs separated by spaces`), jadi jalur query MySQL ke
+  DuckDB tidak pernah bisa jalan sama sekali; password berisi `@` atau `/` sudah merusak string lebih dulu, pola
+  yang sama dengan bug `sslmode` ganda 2026-10-31.
+- **Perakit pindah ke engine:** `backend/engine/duckdb/mysql.go` — `MySQLSource`, `MySQLDSN`,
+  `ErrUnusableMySQLSource` — karena aturannya milik scanner, bukan milik salah satu produk (desktop memakai
+  modul yang sama lewat `replace`). Web memanggil `duckdb.MySQLDSN` di
+  [internal/service/session_preparer.go](backend/internal/service/session_preparer.go); host kosong atau port di
+  luar 0-65535 berhenti sebelum `ATTACH`, tidak lagi dikirim sebagai string rusak.
+- **Aturan yang terukur** (DuckDB 1.1.3; tabel probe lengkap 15 baris ada di `muara.bi-desktop/docs/engine-map.md`
+  §17): kunci hanya `host, port, user, passwd, db, socket`; nilai kosong **dihilangkan** (`passwd=` jadi opsi
+  bernama kosong); spasi/tab/`=` wajib dalam kutip ganda; di dalam kutip hanya `\\` dan `\"` yang sah, di luar
+  kutip backslash **verbatim**; kutip di tengah nilai aman tapi nilai yang **diawali** `"` harus diekscape;
+  `port=0` diam-diam berarti 3306.
+- **CA untuk MySQL tidak bisa di jalur ini** — `ssl-ca`, `ssl-capath`, `ssl-mode` semua `Unrecognized
+  configuration parameter`, dan satu-satunya opsi ATTACH yang dikenal scanner adalah `read_only`. Maka
+  `checkRootCertDriver` menolak `root_cert` pada profil non-Postgres di titik tulis (400 beralasan) daripada
+  menyimpan path yang diam-diam diabaikan; MySQL self-signed tetap lewat bastion/VPN.
+- **Tes:** `engine/duckdb/mysql_test.go` (grammar murni, 5), `engine/duckdb/mysql_scanner_test.go` (2 — 11
+  sumber diterima scanner + 4 bentuk yang tidak kami emit ditolak; butuh `DUCKDB_EXTENSION_DIRECTORY` menunjuk
+  bundel berisi `mysql_scanner`, kalau tidak di-*skip*), dan 3 tes sisi web di `session_preparer_test.go` lewat
+  `recordingSession` yang membuktikan string yang benar-benar dikirim ke `AttachMySQL`. Batas jujur: yang terukur
+  adalah **parsing**, bukan byte di kabel (error scanner menampilkan string asli, bukan hasil unescape) — itu
+  butuh server MySQL sungguhan. **Gerbang empat-mode** (engine+web × `CGO_ENABLED=1/0`:
+  `build`+`vet`+`test`) hijau, `gofmt -l` bersih.
 
 ---
 
